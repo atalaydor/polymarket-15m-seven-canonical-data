@@ -15,6 +15,7 @@ from helpers import CONDITION, START_NS, gamma_payload, market, pmxt_rows
 from canonical_data.discovery import GammaClient, discover
 from canonical_data.errors import (
     IdentityError,
+    MissingInitialSnapshotError,
     ReconstructionError,
     ResourceLimitError,
     SourceError,
@@ -278,13 +279,32 @@ class PmxtTests(unittest.TestCase):
         states = BookReconstructor().reconstruct(decode_rows([snapshot, empty_bid], "fixture"))
         self.assertEqual(states[-1].bids, ())
 
-    def test_increment_or_tick_before_snapshot_fails(self) -> None:
-        increment = pmxt_rows()[2]
-        with self.assertRaises(ReconstructionError):
-            BookReconstructor().reconstruct(decode_rows([increment], "fixture"))
-        tick = pmxt_rows()[3]
-        with self.assertRaises(ReconstructionError):
-            BookReconstructor().reconstruct(decode_rows([tick], "fixture"))
+    def test_unanchored_prefix_is_discarded_until_first_full_snapshot(self) -> None:
+        increment = {
+            **pmxt_rows()[2],
+            "timestamp": START_NS // 1_000_000 - 2_000,
+            "timestamp_received": START_NS // 1_000_000 - 2_000,
+        }
+        snapshots = [
+            {
+                **row,
+                "timestamp": row["timestamp"] - 1_000,
+                "timestamp_received": row["timestamp_received"] - 1_000,
+            }
+            for row in pmxt_rows(False)
+        ]
+        states = BookReconstructor().reconstruct(
+            decode_rows([increment, *snapshots, pmxt_rows()[2]], "fixture")
+        )
+        up = [state for state in states if state.token_id == "1"]
+        self.assertEqual(len(up), 2)
+        self.assertEqual(up[0].receive_ts_ns, START_NS - 1_000_000_000)
+        self.assertEqual(up[-1].bids[0].price, Decimal("0.45"))
+
+    def test_stream_without_any_snapshot_fails_closed(self) -> None:
+        for event in (pmxt_rows()[2], pmxt_rows()[3]):
+            with self.assertRaises(MissingInitialSnapshotError):
+                BookReconstructor().reconstruct(decode_rows([event], "fixture"))
 
     def test_malformed_negative_and_best_quote_inconsistency_fail(self) -> None:
         raw = pmxt_rows(False)[0]

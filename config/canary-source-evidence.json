@@ -1,0 +1,86 @@
+{
+  "schema_version": "1.0.0",
+  "candidate_start": 1786318200,
+  "candidate_start_utc": "2026-08-09T23:30:00Z",
+  "accessed_at": "2026-08-15",
+  "authority": {
+    "polymarket_market_channel": "https://docs.polymarket.com/market-data/websocket/market-channel",
+    "pmxt_v2_overview": "https://archive.pmxt.dev/docs/v2-data-overview",
+    "gamma_url_template": "https://gamma-api.polymarket.com/events?slug={asset}-updown-15m-1786318200"
+  },
+  "probe": {
+    "method": "conditional HTTP byte ranges over Parquet footer and exact market/event/token/timestamp columns",
+    "transferred_bytes": 45784020,
+    "retained_source_bytes": 0
+  },
+  "source_objects": [
+    {
+      "url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T22.parquet",
+      "byte_length": 556866523,
+      "etag": "\"71a50a8be1bcc6c411de818c10e317a7-67\""
+    },
+    {
+      "url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T23.parquet",
+      "byte_length": 507501824,
+      "etag": "\"49b3b199cc0253285a38108bf23f76a0-61\""
+    }
+  ],
+  "assets": [
+    {
+      "asset": "BTC",
+      "condition_id": "0x7241f5b9d466918cc53a10ba32464d2c3ed2c885b6af704a832ec6e3c74d3a1d",
+      "token_books": [
+        {"token_id": "51700794862237290670979172378266361634181087690696891690758456311293144867282", "first_book_received_at": "2026-08-09T22:52:03.951Z"},
+        {"token_id": "53718312152886382246185473695840126716716541434412471710964225513619176598817", "first_book_received_at": "2026-08-09T22:52:03.951Z"}
+      ]
+    },
+    {
+      "asset": "ETH",
+      "condition_id": "0x4ad68a905687cd12e103fe4a56c3332d1b976b25e50c677f635783fa006761ff",
+      "token_books": [
+        {"token_id": "10437102206869759964762177800101142170588950808452263851745391732814171855615", "first_book_received_at": "2026-08-09T22:52:09.342Z"},
+        {"token_id": "69625118413097438332677289878327650969362262155976603411440341374510050532879", "first_book_received_at": "2026-08-09T22:52:09.342Z"}
+      ]
+    },
+    {
+      "asset": "SOL",
+      "condition_id": "0xd097b3006420b757b4f4ec3ed6f2de25d39a0bfc9b7b89394ae83c578dcb95b8",
+      "token_books": [
+        {"token_id": "114441367762612967040747410874934238853716092737230674490215889511709384083528", "first_book_received_at": "2026-08-09T23:25:05.469Z"},
+        {"token_id": "306851139085198281802945804938696664255132907895860718021667665240230166246", "first_book_received_at": "2026-08-09T23:25:05.469Z"}
+      ]
+    },
+    {
+      "asset": "XRP",
+      "condition_id": "0x6ef3e24de75b640c598c5cd849040e516fbe2b5651caebaecddd4382ece72b0d",
+      "token_books": [
+        {"token_id": "23387558625084094458938483440779651150839279130917641422012036802982688182402", "first_book_received_at": "2026-08-09T23:25:05.469Z"},
+        {"token_id": "65940983893772715467311781147332662930116338502150912642422974184967329929619", "first_book_received_at": "2026-08-09T23:25:05.469Z"}
+      ]
+    },
+    {
+      "asset": "DOGE",
+      "condition_id": "0x4bbaabb96aacc951d098f526372cbf1c148f71513022c9df9dd144227ababd61",
+      "token_books": [
+        {"token_id": "17078099303850378986492554639082551047727315354320632998196466492057907229862", "first_book_received_at": "2026-08-09T23:25:55.549Z"},
+        {"token_id": "87105587363435278135414689811004493686618578864469728657405003532521398998944", "first_book_received_at": "2026-08-09T23:25:55.549Z"}
+      ]
+    },
+    {
+      "asset": "BNB",
+      "condition_id": "0xc40a53474cbf89c561b4bc77182c545053ef3bdb43cf5942bba0a67561222fb5",
+      "token_books": [
+        {"token_id": "4872522456228546672662755175701907674063213534888752742503789569376353270812", "first_book_received_at": "2026-08-09T23:27:05.646Z"},
+        {"token_id": "73700915590612332755503514568949984781093010522538168631832313278267785301338", "first_book_received_at": "2026-08-09T23:27:05.646Z"}
+      ]
+    },
+    {
+      "asset": "HYPE",
+      "condition_id": "0xaba6fa000ceec74f0f79d7c066434fc23a3c55a3734503b921159874cf1c690b",
+      "token_books": [
+        {"token_id": "41935977890903091266010631738841467259479174912311127286334845254036843683242", "first_book_received_at": "2026-08-09T23:29:54.747Z"},
+        {"token_id": "76641413276374781151751771242320131190119566059898714019699262191005297464134", "first_book_received_at": "2026-08-09T23:29:54.747Z"}
+      ]
+    }
+  ]
+}

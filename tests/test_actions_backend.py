@@ -19,10 +19,12 @@ from helpers import START_S, market
 from canonical_data.errors import ResourceLimitError, SourceError
 from canonical_data.inventory import SourceObject
 from canonical_data.models import Asset
+from canonical_data.sources import OfficialDiscovery
 from scripts.actions_backend import (
     Authority,
     RemoteAsset,
     _candidate_starts,
+    _pmxt_source_exists,
     _raise_child_failure,
     _request,
     day_plan,
@@ -32,7 +34,12 @@ from scripts.actions_backend import (
     unfinished_plan,
     verified_partitions,
 )
-from scripts.run_backfill import _acquire_with_retry, _market_starts
+from scripts.run_backfill import (
+    _acquire_with_retry,
+    _market_starts,
+    _validate_expected_market_identities,
+    _validate_expected_source_identity,
+)
 
 
 class FakeResponse:
@@ -100,7 +107,14 @@ class ActionsBackendTests(unittest.TestCase):
         )
         self.assertEqual(authority.start, datetime(2026, 4, 13, 20, tzinfo=UTC))
         self.assertEqual(authority.cutoff, datetime(2026, 8, 10, 1, tzinfo=UTC))
-        self.assertEqual(len(_candidate_starts(authority)), 48)
+        self.assertEqual(
+            authority.canary_search_start, datetime(2026, 8, 9, 23, 30, tzinfo=UTC)
+        )
+        candidates = _candidate_starts(authority)
+        self.assertEqual(candidates, [1786318200])
+        self.assertNotIn(1786320000, candidates)
+        self.assertEqual(len(authority.canary_source_markets), 7)
+        self.assertEqual(len(authority.canary_source_objects), 2)
 
     def test_production_entrypoints_use_import_safe_module_execution(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -231,7 +245,9 @@ class ActionsBackendTests(unittest.TestCase):
                 )
                 return fixture, b"payload", "https://example.test/gamma"
 
-        def source_exists(source: SourceObject) -> bool:
+        def source_exists(
+            source: SourceObject, _identity: tuple[int, str] | None
+        ) -> bool:
             probed.append(source.url)
             return True
 
@@ -260,8 +276,75 @@ class ActionsBackendTests(unittest.TestCase):
             patch("scripts.actions_backend.GammaClient") as gamma,
             self.assertRaisesRegex(RuntimeError, "catalog-listed PMXT canary source is missing"),
         ):
-            find_canary_start(authority, lambda _source: False)
+            find_canary_start(authority, lambda _source, _identity: False)
         gamma.return_value.fetch_market.assert_not_called()
+
+    def test_canary_source_probe_binds_recorded_object_identity(self) -> None:
+        source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
+        response = FakeResponse(b"")
+        response.headers.replace_header("Content-Length", "123")
+        response.headers["ETag"] = '"stable"'
+        with patch("scripts.actions_backend.urllib.request.urlopen", return_value=response):
+            self.assertTrue(_pmxt_source_exists(source, (123, '"stable"')))
+        changed = FakeResponse(b"")
+        changed.headers.replace_header("Content-Length", "124")
+        changed.headers["ETag"] = '"changed"'
+        with (
+            patch("scripts.actions_backend.urllib.request.urlopen", return_value=changed),
+            self.assertRaisesRegex(RuntimeError, "source identity changed"),
+        ):
+            _pmxt_source_exists(source, (123, '"stable"'))
+
+    def test_child_acquisition_must_match_source_qualified_object(self) -> None:
+        source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
+        expected = {source.url: (123, '"stable"')}
+        _validate_expected_source_identity(source, 123, '"stable"', expected)
+        with self.assertRaisesRegex(SourceError, "source-qualified identity"):
+            _validate_expected_source_identity(source, 124, '"changed"', expected)
+
+    def test_child_discovery_must_match_source_qualified_identity(self) -> None:
+        discovered = market(Asset.BTC)
+        discoveries = {Asset.BTC: OfficialDiscovery((discovered,), ())}
+        expected = {
+            Asset.BTC: (
+                discovered.condition_id,
+                frozenset((discovered.token_up, discovered.token_down)),
+            )
+        }
+        _validate_expected_market_identities(discoveries, expected)
+        expected[Asset.BTC] = ("0x" + "b" * 64, expected[Asset.BTC][1])
+        with self.assertRaisesRegex(SourceError, "source-qualified canary identity"):
+            _validate_expected_market_identities(discoveries, expected)
+
+    def test_canary_candidate_must_match_source_qualified_identity(self) -> None:
+        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
+        canary_start = START_S + 3_600
+        authority = replace(
+            authority,
+            canary_search_start=datetime.fromtimestamp(canary_start, UTC),
+            canary_search_end=datetime.fromtimestamp(canary_start, UTC),
+            canary_source_markets=(
+                (Asset.BTC, "0x" + "a" * 64, frozenset(("1", "2"))),
+            ),
+        )
+
+        class FakeGamma:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
+                fixture = replace(
+                    market(asset),
+                    market_start_ns=start * 1_000_000_000,
+                    market_end_ns=(start + 900) * 1_000_000_000,
+                )
+                return fixture, b"payload", "https://example.test/gamma"
+
+        with (
+            patch("scripts.actions_backend.GammaClient", FakeGamma),
+            self.assertRaisesRegex(RuntimeError, "source-qualified identity"),
+        ):
+            find_canary_start(authority, lambda _source, _identity: True)
 
     def test_canary_candidate_outside_catalog_is_rejected_before_probe(self) -> None:
         authority = replace(

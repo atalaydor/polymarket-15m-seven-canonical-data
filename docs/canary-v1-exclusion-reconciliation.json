@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": 31899002607,
+  "release": {
+    "api_url": "https://api.github.com/repos/atalaydor/polymarket-15m-seven-canonical-data/releases/371116396",
+    "tag": "polymarket-15m-seven-canary-v1-1786320000-2026-08-a",
+    "draft": true,
+    "accessed_at": "2026-08-15",
+    "assets": 42,
+    "integrity": "All GitHub SHA-256 digests matched content-addressed asset names; every manifest bound its five data files by SHA-256 and byte length."
+  },
+  "common_exclusion": {
+    "reason_code": "EVENT_CONFLICT",
+    "detail": "invalid PMXT market evidence: increment before initial snapshot",
+    "classification": "DEFECTIVE_IMPLEMENTATION_ASSUMPTION",
+    "cause": "Every token stream began with an unanchored price_change delta. The reconstructor incorrectly treated that normal hourly-slice prefix as a conflict and aborted although each token had a later authoritative full book snapshot."
+  },
+  "source_probe": {
+    "accessed_at": "2026-08-15",
+    "method": "conditional HTTP byte ranges over Parquet footer and exact market/event/token/timestamp columns",
+    "transferred_bytes": 40809140,
+    "retained_source_bytes": 0,
+    "objects": [
+      {
+        "url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T23.parquet",
+        "byte_length": 507501824,
+        "etag": "\"49b3b199cc0253285a38108bf23f76a0-61\""
+      },
+      {
+        "url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-10T00.parquet",
+        "byte_length": 361963136,
+        "etag": "\"1478fe69f65f30f767bbf4c4b3e944c6-44\""
+      }
+    ]
+  },
+  "assets": [
+    {"asset": "BTC", "market_id": "3433338", "condition_id": "0xd5664787eac13dfec0f00cb10a8ae124671aa74b7492a0812d1b4bbf4997c105", "filtered_events": 274920, "first_book_received_at": "2026-08-09T23:45:01.535Z", "classification": "DEFECTIVE_EXCLUSION", "manifest_sha256": "954854c3954d3ecd9be146e3600c6d673ca302847f87be6542620541f7c40a76"},
+    {"asset": "ETH", "market_id": "3433330", "condition_id": "0xed690506a7ebc837d5eb73c8af3fd61969f819343cfd0977306b1876e2a6730d", "filtered_events": 161009, "first_book_received_at": "2026-08-09T23:45:15.609Z", "classification": "DEFECTIVE_EXCLUSION", "manifest_sha256": "e1cd24d9540983ce8ed3c9ff5d239a9587af87e46e19bfc79945d39b5b58e3ed"},
+    {"asset": "SOL", "market_id": "3433331", "condition_id": "0x0b813c8ccf47de938dc0a2334e564962dbf0b53b8ce04478d8f005b23f8ece7e", "filtered_events": 99053, "first_book_received_at": "2026-08-09T23:45:01.020Z", "classification": "DEFECTIVE_EXCLUSION", "manifest_sha256": "8556dcaa12785e5f59c7a66529195227830a8c5090c225b986b2f8b33a6ae293"},
+    {"asset": "XRP", "market_id": "3433334", "condition_id": "0xa00f5cc7b22d36746bf992d3e9f1390131cc3792b8d74e94c5617edb95323942", "filtered_events": 126766, "first_book_received_at": "2026-08-09T23:59:47.837Z", "classification": "DEFECTIVE_EXCLUSION", "manifest_sha256": "a584beabdb69140fb6cfe0e0483c1453b0f7103edb203501f0843b51138ea993"},
+    {"asset": "DOGE", "market_id": "3433320", "condition_id": "0xd558e138dbfd7784cf3b0fafa7d5e66468bc449521ea29de08bc28fdda321688", "filtered_events": 72699, "first_book_received_at": "2026-08-09T23:55:58.675Z", "classification": "DEFECTIVE_EXCLUSION", "manifest_sha256": "766317727f4717bc637d431a4a9ae9e1e28951831ecf41a9faeba0cb11e9bc94"},
+    {"asset": "BNB", "market_id": "3433319", "condition_id": "0x3ecd6f8cb9f362030ca9c0623580873489bf3b90681621461b80cef2704b3212", "filtered_events": 42479, "first_book_received_at": "2026-08-10T00:00:07.309Z", "classification": "LEGITIMATE_EXCLUSION_DEFECTIVE_REASON", "canonical_reason": "SOURCE_GAP", "manifest_sha256": "77d73ca25237764ec38064717b496ea19170fa07340a98a0e9b3e65f3eb9e0f7"},
+    {"asset": "HYPE", "market_id": "3433327", "condition_id": "0xf27b6a4283b46b04e7d452829bb33c0060094529c049f418c4a7a05af5fc71cc", "filtered_events": 17208, "first_book_received_at": "2026-08-10T00:00:07.450Z", "classification": "LEGITIMATE_EXCLUSION_DEFECTIVE_REASON", "canonical_reason": "SOURCE_GAP", "manifest_sha256": "8f85209e0256c6c344178ab8dac15058a19c5a5dd8bb39219ab9836e65b26608"}
+  ],
+  "authoritative_interpretation": {
+    "polymarket_market_channel": "https://docs.polymarket.com/market-data/websocket/market-channel",
+    "pmxt_v2_overview": "https://archive.pmxt.dev/docs/v2-data-overview",
+    "accessed_at": "2026-08-15",
+    "rule": "price_change is an incremental level update and cannot initialize a book; book is a full snapshot. Prefix deltas are discarded, never applied. Reconstruction remains unavailable until a full snapshot arrives."
+  },
+  "remediation": {
+    "old_release": "Preserved unchanged as isolated v1 draft evidence. Its EVENT_CONFLICT records are not canonical authority: five dispositions are wrong, while BNB and HYPE are legitimately excluded only under SOURCE_GAP.",
+    "corrected_release_prefix": "polymarket-15m-seven-canary-v2",
+    "conflict_policy": "Corrected outputs must not overwrite or reuse v1 logical assets.",
+    "source_qualified_candidate": "config/canary-source-evidence.json"
+  }
+}

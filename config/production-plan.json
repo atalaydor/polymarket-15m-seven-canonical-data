@@ -20,7 +20,7 @@
   },
   "publication": {
     "release_prefix": "polymarket-15m-seven-v1",
-    "canary_release_prefix": "polymarket-15m-seven-canary-v1",
+    "canary_release_prefix": "polymarket-15m-seven-canary-v2",
     "grouping": "half_month",
     "maximum_assets_per_release": 672,
     "draft_first": true,
@@ -35,9 +35,9 @@
   "canary": {
     "scope": "one resolved common 15m window across all seven assets",
     "search": {
-      "start": "2026-08-10T00:00:00Z",
-      "end": "2026-08-08T01:00:00Z",
-      "step_minutes": 60
+      "start": "2026-08-09T23:30:00Z",
+      "end": "2026-08-09T23:30:00Z",
+      "step_minutes": 15
     },
     "full_plan_unlock": "committed config/canary-receipt.json with PASSED status"
   }

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from canonical_data.audit import canonical_json_bytes
-from canonical_data.errors import PipelineError, ResourceLimitError
+from canonical_data.errors import MissingInitialSnapshotError, PipelineError, ResourceLimitError
 from canonical_data.manifest import build_manifest, verify_manifest
 from canonical_data.models import (
     Asset,
@@ -181,6 +181,19 @@ class Pipeline:
                     native_samples, gaps = resample_200ms(market, states)
                 else:
                     native_samples, gaps = [], [(market.market_start_ns, market.market_end_ns)]
+            except MissingInitialSnapshotError as reconstruction_error:
+                exclusions.append(
+                    Exclusion(
+                        market.market_id,
+                        ExclusionReason.NO_INITIAL_SNAPSHOT,
+                        str(reconstruction_error),
+                        {
+                            "condition_id": market.condition_id,
+                            "market_evidence_sha256": market.evidence_sha256,
+                        },
+                    )
+                )
+                continue
             except PipelineError as reconstruction_error:
                 exclusions.append(
                     Exclusion(

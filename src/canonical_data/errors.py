@@ -27,6 +27,10 @@ class ReconstructionError(PipelineError):
     """A book stream cannot be reconstructed without ambiguity."""
 
 
+class MissingInitialSnapshotError(ReconstructionError):
+    """A bounded event stream contains no full order-book snapshot."""
+
+
 class ConflictError(PipelineError):
     """An immutable identity already exists with different content."""
 

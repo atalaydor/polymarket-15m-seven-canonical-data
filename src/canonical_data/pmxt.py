@@ -14,7 +14,12 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from canonical_data.audit import canonical_json_bytes, sha256_bytes
-from canonical_data.errors import ReconstructionError, ResourceLimitError, SourceError
+from canonical_data.errors import (
+    MissingInitialSnapshotError,
+    ReconstructionError,
+    ResourceLimitError,
+    SourceError,
+)
 from canonical_data.models import BookEvent, BookState, EventType, Level, QualityTier
 from canonical_data.timeutil import epoch_to_ns
 
@@ -280,7 +285,7 @@ class BookReconstructor:
                 asks = {level.price: level.size for level in event.asks}
             elif event.event_type is EventType.PRICE_CHANGE:
                 if bids is None or asks is None:
-                    raise ReconstructionError("increment before initial snapshot")
+                    continue
                 assert event.price is not None and event.size is not None and event.side is not None
                 levels = bids if event.side == "BUY" else asks
                 if event.size == 0:
@@ -289,7 +294,7 @@ class BookReconstructor:
                     levels[event.price] = event.size
             elif event.event_type is EventType.TICK_SIZE_CHANGE:
                 if bids is None or asks is None:
-                    raise ReconstructionError("tick change before initial snapshot")
+                    continue
                 if tick_size is not None and event.old_tick_size != tick_size:
                     raise ReconstructionError("tick-size chain is inconsistent")
                 tick_size = event.new_tick_size
@@ -349,5 +354,5 @@ class BookReconstructor:
                 )
             )
         if not states:
-            raise ReconstructionError("no usable initial snapshot")
+            raise MissingInitialSnapshotError("no usable initial snapshot")
         return states

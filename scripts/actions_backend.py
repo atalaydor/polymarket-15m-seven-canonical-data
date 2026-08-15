@@ -44,8 +44,9 @@ from scripts.run_backfill import (
 )
 
 API = f"https://api.github.com/repos/{REPOSITORY}"
-CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v1"
+CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v2"
 AUTHORITY_PATH = Path("config/production-plan.json")
+CANARY_SOURCE_EVIDENCE_PATH = Path("config/canary-source-evidence.json")
 CANARY_RECEIPT_PATH = Path("config/canary-receipt.json")
 LEDGER_PATH = Path("config/backfill-ledger.json")
 EXPECTED_FILES = {
@@ -72,6 +73,8 @@ class Authority:
     canary_search_start: datetime
     canary_search_end: datetime
     canary_step_minutes: int
+    canary_source_markets: tuple[tuple[Asset, str, frozenset[str]], ...] = ()
+    canary_source_objects: tuple[tuple[str, int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,55 @@ def _parse_utc(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _validate_canary_source_evidence(
+    authority: Authority,
+) -> tuple[
+    tuple[tuple[Asset, str, frozenset[str]], ...], tuple[tuple[str, int, str], ...]
+]:
+    raw = json.loads(CANARY_SOURCE_EVIDENCE_PATH.read_bytes())
+    candidate = datetime.fromtimestamp(int(raw["candidate_start"]), UTC)
+    if candidate != authority.canary_search_start or candidate != authority.canary_search_end:
+        raise RuntimeError("canary search is not pinned to its source-qualified candidate")
+    expected_objects = {
+        source.url
+        for source in pmxt_hourly_objects(
+            (int(raw["candidate_start"]) - 3_600) * 1_000_000_000,
+            (int(raw["candidate_start"]) + 900) * 1_000_000_000,
+        )
+    }
+    objects = raw.get("source_objects", [])
+    if (
+        {item.get("url") for item in objects} != expected_objects
+        or any(int(item.get("byte_length", 0)) <= 0 or not item.get("etag") for item in objects)
+    ):
+        raise RuntimeError("canary source evidence does not bind its required PMXT objects")
+    assets = raw.get("assets", [])
+    if [item.get("asset") for item in assets] != [asset.value for asset in authority.assets]:
+        raise RuntimeError("canary source evidence does not cover the frozen asset scope")
+    result = []
+    for asset, item in zip(authority.assets, assets, strict=True):
+        condition = item.get("condition_id", "")
+        token_books = item.get("token_books", [])
+        tokens = [str(book.get("token_id", "")) for book in token_books]
+        first_books = [
+            _parse_utc(str(book.get("first_book_received_at", ""))) for book in token_books
+        ]
+        if (
+            re.fullmatch(r"0x[0-9a-f]{64}", str(condition)) is None
+            or len(tokens) != 2
+            or len(set(tokens)) != 2
+            or any(not str(token).isdigit() for token in tokens)
+            or any(first_book > candidate for first_book in first_books)
+        ):
+            raise RuntimeError("canary source evidence does not prove a pre-window full snapshot")
+        result.append((asset, str(condition), frozenset(str(token) for token in tokens)))
+    object_identities = tuple(
+        (str(item["url"]), int(item["byte_length"]), str(item["etag"]))
+        for item in sorted(objects, key=lambda value: str(value["url"]))
+    )
+    return tuple(result), object_identities
+
+
 def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
     raw = json.loads(path.read_bytes())
     expected_assets = tuple(Asset)
@@ -136,6 +188,8 @@ def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
         raise RuntimeError("production plan is not exactly the frozen 15m x 7 scope")
     if raw["publication"].get("release_prefix") != DATASET_RELEASE_PREFIX:
         raise RuntimeError("production release namespace is not frozen")
+    if raw["publication"].get("canary_release_prefix") != CANARY_RELEASE_PREFIX:
+        raise RuntimeError("canary release namespace is not frozen")
     search = raw["canary"]["search"]
     authority = Authority(
         _parse_utc(raw["coverage_start"]),
@@ -161,7 +215,17 @@ def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
         raise RuntimeError("canary search exceeds production source coverage")
     if authority.canary_step_minutes not in {15, 30, 60}:
         raise RuntimeError("canary search step is outside the finite allowed set")
-    return authority
+    source_markets, source_objects = _validate_canary_source_evidence(authority)
+    return Authority(
+        authority.start,
+        authority.cutoff,
+        authority.assets,
+        authority.canary_search_start,
+        authority.canary_search_end,
+        authority.canary_step_minutes,
+        source_markets,
+        source_objects,
+    )
 
 
 def _full_plan(authority: Authority) -> list[dict[str, Any]]:
@@ -341,7 +405,10 @@ def _download_verify(asset: RemoteAsset, directory: Path) -> Path:
 
 
 def verify_remote_partition(
-    partition: str, inventory: dict[str, list[RemoteAsset]]
+    partition: str,
+    inventory: dict[str, list[RemoteAsset]],
+    expected_market: tuple[str, frozenset[str]] | None = None,
+    expected_sources: frozenset[tuple[str, int, str]] | None = None,
 ) -> dict[str, Any]:
     expected_asset = partition.split("/", 1)[0]
     assets = inventory.get(partition, [])
@@ -362,6 +429,21 @@ def verify_remote_partition(
         ):
             raise RuntimeError("remote manifest identity mismatch")
         market_rows = pq.read_table(directory / "markets.parquet").to_pylist()
+        if expected_market is not None:
+            published = {
+                (row["condition_id"], frozenset((row["token_up"], row["token_down"])))
+                for row in market_rows
+            }
+            if published != {expected_market}:
+                raise RuntimeError("remote canary market does not match source-qualified identity")
+        if expected_sources is not None:
+            published_sources = frozenset(
+                (item["source_url"], int(item["byte_length"]), str(item.get("etag", "")))
+                for item in manifest["provenance"]
+                if item["source_id"] == "pmxt_v2"
+            )
+            if published_sources != expected_sources:
+                raise RuntimeError("remote canary PMXT provenance changed")
         for row in market_rows:
             if (
                 row["asset"] != expected_asset
@@ -539,7 +621,9 @@ def _candidate_starts(authority: Authority) -> list[int]:
     return result
 
 
-def _pmxt_source_exists(source: SourceObject) -> bool:
+def _pmxt_source_exists(
+    source: SourceObject, expected_identity: tuple[int, str] | None = None
+) -> bool:
     request = urllib.request.Request(source.url, method="HEAD", headers={"User-Agent": USER_AGENT})
     last_error: Exception | None = None
     for attempt, delay in enumerate((0, *TRANSFER_RETRY_DELAYS)):
@@ -548,6 +632,11 @@ def _pmxt_source_exists(source: SourceObject) -> bool:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 status = int(response.status)
+                if expected_identity is not None:
+                    length = int(response.headers.get("Content-Length", "0"))
+                    etag = response.headers.get("ETag", "")
+                    if (length, etag) != expected_identity:
+                        raise RuntimeError("PMXT canary source identity changed")
                 return 200 <= status < 300
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
@@ -565,9 +654,17 @@ def _pmxt_source_exists(source: SourceObject) -> bool:
 
 def find_canary_start(
     authority: Authority,
-    source_exists: Callable[[SourceObject], bool] = _pmxt_source_exists,
+    source_exists: Callable[[SourceObject, tuple[int, str] | None], bool] = _pmxt_source_exists,
 ) -> tuple[int, dict[Asset, Any], int]:
     gamma = GammaClient(fetch=_fetch_gamma)
+    source_markets = {
+        asset: (condition, tokens)
+        for asset, condition, tokens in authority.canary_source_markets
+    }
+    source_identities = {
+        url: (byte_length, etag)
+        for url, byte_length, etag in authority.canary_source_objects
+    }
     attempts = 0
     for start in _candidate_starts(authority):
         source_objects = pmxt_hourly_objects(
@@ -577,7 +674,10 @@ def find_canary_start(
         if any(source.url in PMXT_MISSING_OBJECT_URLS for source in source_objects):
             continue
         for source in source_objects:
-            if not source_exists(source):
+            expected_identity = source_identities.get(source.url)
+            if source_identities and expected_identity is None:
+                raise RuntimeError("canary source object lacks qualified identity")
+            if not source_exists(source, expected_identity):
                 raise RuntimeError(
                     f"catalog-listed PMXT canary source is missing: {source.url}"
                 )
@@ -596,6 +696,14 @@ def find_canary_start(
                 or market.market_end_ns - market.market_start_ns != 900_000_000_000
             ):
                 raise RuntimeError("Gamma candidate violates exact 15m identity")
+            if source_markets:
+                expected = source_markets.get(asset)
+                actual = (
+                    market.condition_id,
+                    frozenset((market.token_up, market.token_down)),
+                )
+                if expected != actual:
+                    raise RuntimeError("Gamma candidate does not match source-qualified identity")
             markets[asset] = market
         if not rejected and len(markets) == len(authority.assets):
             return start, markets, attempts
@@ -617,6 +725,25 @@ def command_canary() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         ledger_path = root / "ledger.json"
+        expected_markets_path = root / "expected-markets.json"
+        expected_sources_path = root / "expected-sources.json"
+        _atomic_json(
+            expected_markets_path,
+            {
+                asset.value: {
+                    "condition_id": market.condition_id,
+                    "token_ids": sorted((market.token_up, market.token_down)),
+                }
+                for asset, market in markets.items()
+            },
+        )
+        _atomic_json(
+            expected_sources_path,
+            {
+                url: {"byte_length": byte_length, "etag": etag}
+                for url, byte_length, etag in authority.canary_source_objects
+            },
+        )
         minimum_free_disk = disk_before
         stop_sampling = threading.Event()
 
@@ -649,6 +776,10 @@ def command_canary() -> None:
                     str(start),
                     "--release-prefix",
                     release_prefix,
+                    "--expected-market-identities",
+                    str(expected_markets_path),
+                    "--expected-source-identities",
+                    str(expected_sources_path),
                 ],
                 text=True,
                 capture_output=True,
@@ -669,13 +800,20 @@ def command_canary() -> None:
 
     canary_inventory = remote_inventory(exact_tags={release_tag})
     proofs = []
+    expected_sources = frozenset(authority.canary_source_objects)
     for asset in authority.assets:
         partition = f"{asset.value}/15m/{day.isoformat()}"
-        proof = verify_remote_partition(partition, canary_inventory)
+        expected_market = (
+            markets[asset].condition_id,
+            frozenset((markets[asset].token_up, markets[asset].token_down)),
+        )
+        proof = verify_remote_partition(
+            partition, canary_inventory, expected_market, expected_sources
+        )
         if proof["markets"] != 1 or not proof["authenticated_redownload"]:
             raise RuntimeError("canary publication proof is incomplete")
         proofs.append(proof)
-        verify_remote_partition(partition, canary_inventory)
+        verify_remote_partition(partition, canary_inventory, expected_market, expected_sources)
     common_pmxt_urls = set(proofs[0]["pmxt_urls"])
     if not common_pmxt_urls or any(set(proof["pmxt_urls"]) != common_pmxt_urls for proof in proofs):
         raise RuntimeError("seven assets do not share one PMXT acquisition inventory")

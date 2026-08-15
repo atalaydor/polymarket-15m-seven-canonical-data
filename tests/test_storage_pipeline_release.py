@@ -295,8 +295,39 @@ class PipelineTests(unittest.TestCase):
             built = pipeline.build(inputs, market().market_end_ns)
             self.assertEqual(built.tier, QualityTier.EXCLUDED)
             exclusions = pq.read_table(built.directory / "exclusions.parquet").to_pylist()
-            self.assertEqual(exclusions[0]["reason_code"], "EVENT_CONFLICT")
+            self.assertEqual(exclusions[0]["reason_code"], "NO_INITIAL_SNAPSHOT")
             self.assertIn("condition_id", exclusions[0]["evidence_json"])
+
+    def test_pre_snapshot_increment_does_not_poison_later_full_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            prefix = {
+                **pmxt_rows()[2],
+                "timestamp": market().market_start_ns // 1_000_000 - 2_000,
+                "timestamp_received": market().market_start_ns // 1_000_000 - 2_000,
+            }
+            snapshots = [
+                {
+                    **row,
+                    "timestamp": row["timestamp"] - 1_000,
+                    "timestamp_received": row["timestamp_received"] - 1_000,
+                }
+                for row in pmxt_rows(False)
+            ]
+            built = Pipeline(root / "out", StateStore(root / "state"), COMMIT).build(
+                PartitionInputs(
+                    Asset.DOGE,
+                    "2026-04-13",
+                    (market(),),
+                    tuple([prefix, *snapshots, pmxt_rows()[2]]),
+                    "fixture",
+                    provenance=(provenance(),),
+                ),
+                market().market_end_ns,
+            )
+            self.assertEqual(built.tier, QualityTier.TIER_A)
+            manifest = json.loads((built.directory / "manifest.json").read_bytes())
+            self.assertEqual(manifest["statistics"]["exclusion_count"], 0)
 
     def test_reconstructable_pmxt_initial_gap_is_excluded(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

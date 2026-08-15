@@ -15,6 +15,6 @@ file checksums, statistics, quality, and exclusions. Release assets are content-
 partition is exactly one uploaded asset for every required logical file with matching embedded
 digests. Published partitions are immutable.
 
-Canary partitions use `polymarket-15m-seven-canary-v1-*` Releases and cover one declared 15-minute
-window. Production partitions use `polymarket-15m-seven-v1-YYYY-MM` Releases and are the only
+Corrected canary partitions use `polymarket-15m-seven-canary-v2-*` Releases and cover one declared 15-minute
+window. Production partitions use `polymarket-15m-seven-v1-YYYY-MM-a|b` Releases and are the only
 authority considered by the full planner.

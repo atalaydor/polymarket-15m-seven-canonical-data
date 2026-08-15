@@ -180,6 +180,35 @@ def _market_starts(
     return sorted(set(starts))
 
 
+def _validate_expected_market_identities(
+    discoveries: dict[Asset, OfficialDiscovery],
+    expected: dict[Asset, tuple[str, frozenset[str]]] | None,
+) -> None:
+    if expected is None:
+        return
+    if set(expected) != set(discoveries):
+        raise SourceError("expected market identities do not cover the execution assets")
+    for asset, discovery in discoveries.items():
+        actual = {
+            (market.condition_id, frozenset((market.token_up, market.token_down)))
+            for market in discovery.markets
+        }
+        if actual != {expected[asset]}:
+            raise SourceError("child discovery does not match source-qualified canary identity")
+
+
+def _validate_expected_source_identity(
+    source: SourceObject,
+    byte_length: int,
+    etag: str | None,
+    expected: dict[str, tuple[int, str]] | None,
+) -> None:
+    if expected is None:
+        return
+    if expected.get(source.url) != (byte_length, etag):
+        raise SourceError("acquired PMXT object does not match source-qualified identity")
+
+
 def prepare_shared_day(
     day: date,
     work_root: Path,
@@ -187,6 +216,8 @@ def prepare_shared_day(
     cutoff: datetime,
     assets: tuple[Asset, ...] = tuple(Asset),
     starts: tuple[int, ...] | None = None,
+    expected_market_identities: dict[Asset, tuple[str, frozenset[str]]] | None = None,
+    expected_source_identities: dict[str, tuple[int, str]] | None = None,
 ) -> tuple[
     Path,
     dict[Asset, OfficialDiscovery],
@@ -213,6 +244,7 @@ def prepare_shared_day(
         discoveries[asset] = loader.discover(
             asset, selected_starts, allow_missing=True, allow_unresolved=True
         )
+    _validate_expected_market_identities(discoveries, expected_market_identities)
     spool_path = shared / "events.sqlite"
     if not any(discovery.markets for discovery in discoveries.values()):
         with EventSpool(spool_path):
@@ -224,9 +256,14 @@ def prepare_shared_day(
     first_start_ns = min(market.market_start_ns for market in combined_markets)
     last_end_ns = max(market.market_end_ns for market in combined_markets)
     inventory_start_ns = max(first_start_ns - 3_600_000_000_000, 0)
+    source_objects = pmxt_hourly_objects(inventory_start_ns, last_end_ns)
+    if expected_source_identities is not None and {
+        source.url for source in source_objects
+    } != set(expected_source_identities):
+        raise SourceError("qualified PMXT objects do not match the execution source set")
     with EventSpool(spool_path, create_index=False) as spool:
         spool.drop_index()
-        for source in pmxt_hourly_objects(inventory_start_ns, last_end_ns):
+        for source in source_objects:
             if source.url in state["completed_urls"]:
                 continue
             if source.url in PMXT_HTTP_404_GAPS:
@@ -234,6 +271,12 @@ def prepare_shared_day(
                 _atomic_json(state_path, state)
                 continue
             acquired = _acquire_with_retry(source, shared / "raw")
+            _validate_expected_source_identity(
+                source,
+                acquired.byte_length,
+                acquired.etag,
+                expected_source_identities,
+            )
             loaded = loaders[assets[0]].load_downloaded_pmxt(
                 acquired.path,
                 source.url,
@@ -359,9 +402,18 @@ def run_day(
     assets: tuple[Asset, ...],
     starts: tuple[int, ...] | None = None,
     release_prefix: str = DATASET_RELEASE_PREFIX,
+    expected_market_identities: dict[Asset, tuple[str, frozenset[str]]] | None = None,
+    expected_source_identities: dict[str, tuple[int, str]] | None = None,
 ) -> list[dict[str, Any]]:
     spool, discoveries, provenance, source_bytes = prepare_shared_day(
-        day, work_root, coverage_start, cutoff, assets, starts
+        day,
+        work_root,
+        coverage_start,
+        cutoff,
+        assets,
+        starts,
+        expected_market_identities,
+        expected_source_identities,
     )
     day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     partition_coverage_start = (
@@ -400,6 +452,8 @@ def main() -> None:
     parser.add_argument("--assets", default=",".join(asset.value for asset in Asset))
     parser.add_argument("--market-starts", default="")
     parser.add_argument("--release-prefix", default=DATASET_RELEASE_PREFIX)
+    parser.add_argument("--expected-market-identities", type=Path)
+    parser.add_argument("--expected-source-identities", type=Path)
     args = parser.parse_args()
     assets = tuple(Asset(value) for value in args.assets.split(","))
     if not assets or len(set(assets)) != len(assets):
@@ -407,6 +461,23 @@ def main() -> None:
     if args.coverage_start.tzinfo is None or args.cutoff.tzinfo is None:
         parser.error("--coverage-start and --cutoff must be timezone-aware")
     starts = tuple(int(value) for value in args.market_starts.split(",") if value)
+    expected_market_identities = None
+    if args.expected_market_identities is not None:
+        raw_expected = json.loads(args.expected_market_identities.read_bytes())
+        expected_market_identities = {
+            Asset(asset): (
+                str(value["condition_id"]),
+                frozenset(str(token) for token in value["token_ids"]),
+            )
+            for asset, value in raw_expected.items()
+        }
+    expected_source_identities = None
+    if args.expected_source_identities is not None:
+        raw_sources = json.loads(args.expected_source_identities.read_bytes())
+        expected_source_identities = {
+            str(url): (int(value["byte_length"]), str(value["etag"]))
+            for url, value in raw_sources.items()
+        }
     current = args.start
     while current <= args.end:
         for result in run_day(
@@ -418,6 +489,8 @@ def main() -> None:
             assets,
             starts or None,
             args.release_prefix,
+            expected_market_identities,
+            expected_source_identities,
         ):
             print(json.dumps(result, sort_keys=True), flush=True)
         current += timedelta(days=1)

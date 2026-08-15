@@ -23,3 +23,12 @@ hour is now reserved for reconstruction warm-up, the cutoff is bounded by the la
 and canary candidates verify their two required source objects before discovery. No unresolved
 local conflict remains after focused verification. The remaining boundary is one real Actions
 canary dispatch; bulk production is intentionally not launched.
+
+Run 31899002607 then proved shared acquisition and real seven-asset filtering but exposed a common
+reconstruction defect: every bounded stream began with an incremental update, and the implementation
+aborted before its first full snapshot. A bounded exact-market source probe showed that the 00:00
+window was also unsuitable: BNB and HYPE did not receive their first full snapshots until after the
+window started. The replacement 23:30 window has pre-start snapshots for both tokens of all seven
+assets and is frozen in `config/canary-source-evidence.json`. The 42 digest-verified v1 draft assets
+remain isolated evidence as recorded in `canary-v1-exclusion-reconciliation.json`; corrected canary
+output uses the v2 namespace, and production authority remains locked pending that canary.
