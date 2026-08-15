@@ -16,19 +16,14 @@ from canonical_data.errors import IdentityError, UnresolvedMarketError
 from canonical_data.httpclient import USER_AGENT
 from canonical_data.models import Asset, Market, Outcome, QualityTier
 
-SLUG = re.compile(r"^(doge|bnb|hype)-updown-5m-([0-9]{10})$")
+SLUG = re.compile(r"^(btc|eth|sol|xrp|doge|bnb|hype)-updown-15m-([0-9]{10})$")
 CONDITION = re.compile(r"^0x[0-9a-f]{64}$")
-ASSET_STREAMS = {
-    Asset.DOGE: "https://data.chain.link/streams/doge-usd",
-    Asset.BNB: "https://data.chain.link/streams/bnb-usd",
-    Asset.HYPE: "https://data.chain.link/streams/hype-usd",
-}
-ASSET_TWAP_STREAMS = {
-    Asset.DOGE: "https://data.chain.link/streams/doge-usd-twap-30s-streams",
-    Asset.BNB: "https://data.chain.link/streams/bnb-usd-twap-30s-streams",
-    Asset.HYPE: "https://data.chain.link/streams/hype-usd-twap-30s-streams",
-}
+CHAINLINK_STREAM = re.compile(r"^https://data\.chain\.link/streams/([a-z0-9-]+)$")
 ASSET_RULE_NAMES = {
+    Asset.BTC: ("btc", "bitcoin"),
+    Asset.ETH: ("eth", "ethereum", "ether"),
+    Asset.SOL: ("sol", "solana"),
+    Asset.XRP: ("xrp", "ripple"),
     Asset.DOGE: ("doge", "dogecoin"),
     Asset.BNB: ("bnb", "binance coin"),
     Asset.HYPE: ("hype", "hyperliquid"),
@@ -57,7 +52,7 @@ class GammaClient:
         self.max_payload_bytes = max_payload_bytes
 
     def fetch_slug_payload(self, asset: Asset, market_start_s: int) -> tuple[bytes, str]:
-        slug = f"{asset.value.lower()}-updown-5m-{market_start_s}"
+        slug = f"{asset.value.lower()}-updown-15m-{market_start_s}"
         query = urllib.parse.urlencode({"slug": slug})
         url = f"https://gamma-api.polymarket.com/events?{query}"
         payload = self.fetch(url, self.max_payload_bytes)
@@ -91,38 +86,38 @@ def _official_outcome(prices: list[Any]) -> Outcome:
 
 def _rules_bind_stream(asset: Asset, rules: str, source_url: object) -> str:
     """Bind the exact stream from controlling rules plus the Gamma source field."""
-    spot = ASSET_STREAMS[asset]
-    twap = ASSET_TWAP_STREAMS[asset]
-    allowed = (spot, twap)
     declared = source_url.strip().rstrip("/") if isinstance(source_url, str) else ""
     rules_lower = rules.lower()
-    rules_name_stream = (
-        "chainlink" in rules_lower and f"{asset.value.lower()}/usd" in rules_lower
-    )
-    rules_streams = tuple(stream for stream in allowed if stream in rules or f"{stream}/" in rules)
     rules_asset_identity = any(
         re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", rules_lower)
         for name in ASSET_RULE_NAMES[asset]
     )
-    # Gamma's dedicated resolutionSource field is authoritative when it is the exact
-    # frozen stream and the controlling prose independently names the bound asset.
-    if declared == spot and (spot in rules_streams or rules_name_stream or rules_asset_identity):
-        return spot
+    rules_streams = tuple(
+        sorted(
+            {
+                match.group(0).rstrip("/.,)")
+                for match in re.finditer(
+                    r"https://data\.chain\.link/streams/[a-z0-9-]+", rules_lower
+                )
+            }
+        )
+    )
+    candidate = declared or (rules_streams[0] if len(rules_streams) == 1 else "")
+    match = CHAINLINK_STREAM.fullmatch(candidate)
+    path = match.group(1) if match is not None else ""
+    asset_path = path == f"{asset.value.lower()}-usd" or path.startswith(
+        f"{asset.value.lower()}-usd-"
+    )
+    rules_bind_candidate = candidate in rules_streams or declared == candidate
+    twap_consistent = "twap" not in path or "twap" in rules_lower
     if (
-        declared == twap
-        and twap in rules_streams
-        and "chainlink" in rules_lower
-        and "twap" in rules_lower
+        match is not None
+        and asset_path
         and rules_asset_identity
+        and rules_bind_candidate
+        and twap_consistent
     ):
-        return twap
-    # The per-market rules are controlling when Gamma leaves its redundant summary field blank.
-    if not declared and len(rules_streams) == 1:
-        rules_stream = rules_streams[0]
-        if rules_stream == spot or (
-            "chainlink" in rules_lower and "twap" in rules_lower and rules_asset_identity
-        ):
-            return rules_stream
+        return candidate
     rules_digest = hashlib.sha256(rules.encode()).hexdigest()
     excerpt = " ".join(rules.split())[:500]
     raise IdentityError(
@@ -143,8 +138,11 @@ def bind_gamma_market(event: dict[str, Any], retrieved_payload: bytes) -> Market
         raise IdentityError("unsupported market slug")
     slug = cast(str, slug)
     asset = Asset(match.group(1).upper())
-    start_ns = int(match.group(2)) * 1_000_000_000
-    end_ns = start_ns + 300_000_000_000
+    start_s = int(match.group(2))
+    if start_s % 900:
+        raise IdentityError("15m market slug timestamp is not 15-minute aligned")
+    start_ns = start_s * 1_000_000_000
+    end_ns = start_ns + 900_000_000_000
     outcomes = [str(value).upper() for value in _json_list(raw.get("outcomes"), "outcomes")]
     tokens = [str(value) for value in _json_list(raw.get("clobTokenIds"), "clobTokenIds")]
     if (

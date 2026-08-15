@@ -1,11 +1,50 @@
 {
-  "audit_date": "2026-08-07",
+  "audit_date": "2026-08-15",
+  "dataset_id": "polymarket-15m-seven-v1",
   "sources": [
-    {"id":"pmxt_v2","class":"PRIMARY","role":"event_book","license":"CC-BY-4.0","start":"2026-04-13T19:00:00Z","url":"https://archive.pmxt.dev/docs/v2-data-overview"},
-    {"id":"polymarket_gamma_clob","class":"PRIMARY","role":"identity_rules_outcome","license":"ungranted_for_bulk_redistribution","url":"https://docs.polymarket.com/market-data/overview"},
-    {"id":"kacho_5m","class":"BACKFILL","role":"validation_top_of_book","license":"CC0-1.0","start":"2026-04-05T00:00:00Z","end":"2026-05-18T23:59:59Z","url":"https://huggingface.co/datasets/kachoio/polymarket-5-minute-crypto-up-down-markets"},
-    {"id":"binance_public","class":"VALIDATION","role":"venue_reference_not_settlement","license":"MIT_archive_repository_claim","url":"https://github.com/binance/binance-public-data"},
-    {"id":"chainlink_stream_ui","class":"EXCLUDED","role":"rules_named_reference_without_free_historical_archive_contract","license":"not_established","url":"https://data.chain.link/streams"},
-    {"id":"third_party_misc","class":"EXCLUDED","role":"no_material_authoritative_improvement","license":"not_audited","url":""}
+    {
+      "id": "pmxt_v2",
+      "class": "PRIMARY",
+      "role": "timeframe_neutral_event_book_filtered_by_official_condition_and_tokens",
+      "license": "CC-BY-4.0",
+      "url": "https://archive.pmxt.dev/docs/v2-data-overview",
+      "accessed_at": "2026-08-07",
+      "coverage_start": "2026-04-13T19:00:00Z",
+      "reuse": "timeframe-neutral PMXT v2 catalog/object metadata recorded in docs/timeframe-neutral-evidence.json; no 5m-derived evidence"
+    },
+    {
+      "id": "polymarket_gamma_clob",
+      "class": "PRIMARY",
+      "role": "15m_identity_rules_tokens_and_official_outcome",
+      "license": "ungranted_for_bulk_redistribution",
+      "url": "https://docs.polymarket.com/market-data/overview",
+      "accessed_at": "2026-08-15",
+      "reuse": "software method only; every 15m payload is newly retrieved"
+    },
+    {
+      "id": "chainlink_stream_ui",
+      "class": "AUTHORITY_BINDING",
+      "role": "exact spot_or_twap_stream_named_by_each_official_market",
+      "license": "not_redistributed",
+      "url": "https://data.chain.link/streams",
+      "accessed_at": "2026-08-15",
+      "reuse": "none; binding is derived from each 15m rules payload"
+    },
+    {
+      "id": "kacho_5m",
+      "class": "EXCLUDED",
+      "role": "5m_specific_and_not_authority_for_15m",
+      "license": "CC0-1.0",
+      "url": "https://huggingface.co/datasets/kachoio/polymarket-5-minute-crypto-up-down-markets",
+      "accessed_at": "2026-08-15"
+    },
+    {
+      "id": "binance_public",
+      "class": "EXCLUDED",
+      "role": "venue_reference_not_settlement_and_not_needed_by_minimum_canary",
+      "license": "MIT_archive_repository_claim",
+      "url": "https://github.com/binance/binance-public-data",
+      "accessed_at": "2026-08-15"
+    }
   ]
 }

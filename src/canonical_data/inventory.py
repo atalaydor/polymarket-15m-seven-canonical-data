@@ -17,15 +17,18 @@ class SourceObject:
     expected_bytes: int | None = None
 
 
-def expected_5m_market_starts(day: date, cutoff: datetime) -> list[int]:
-    if cutoff.tzinfo is None:
-        raise SourceError("release cutoff must be timezone-aware")
+def expected_15m_market_starts(day: date, coverage_start: datetime, cutoff: datetime) -> list[int]:
+    if coverage_start.tzinfo is None or cutoff.tzinfo is None:
+        raise SourceError("coverage bounds must be timezone-aware")
+    if cutoff <= coverage_start:
+        raise SourceError("release cutoff must follow coverage start")
     midnight = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
+    coverage_start_s = int(coverage_start.timestamp())
     cutoff_s = int(cutoff.timestamp())
     return [
         midnight + offset
-        for offset in range(0, 86_400, 300)
-        if midnight + offset < cutoff_s
+        for offset in range(0, 86_400, 900)
+        if coverage_start_s <= midnight + offset < cutoff_s
     ]
 
 

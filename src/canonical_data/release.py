@@ -313,9 +313,7 @@ class GitHubReleaseBackend:
             raise last_error
         raise SourceError("GitHub upload transport failed after bounded retries") from last_error
 
-    def _reconcile_upload(
-        self, release_id: str, name: str, length: int
-    ) -> ReleaseAsset | None:
+    def _reconcile_upload(self, release_id: str, name: str, length: int) -> ReleaseAsset | None:
         matches = [asset for asset in self.list_assets(release_id) if asset.name == name]
         if len(matches) > 1:
             raise ConflictError("multiple remote assets share one content-addressed name")
@@ -344,9 +342,10 @@ class GitHubReleaseBackend:
                 },
             )
             try:
-                with urllib.request.urlopen(request, timeout=120) as response, target.open(
-                    "wb"
-                ) as handle:
+                with (
+                    urllib.request.urlopen(request, timeout=120) as response,
+                    target.open("wb") as handle,
+                ):
                     shutil.copyfileobj(response, handle, length=1_048_576)
                 return
             except urllib.error.HTTPError as exc:

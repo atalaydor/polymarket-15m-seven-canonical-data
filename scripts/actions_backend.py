@@ -1,9 +1,8 @@
-"""Bounded GitHub Actions adapter for the finite Chapter 4 executor."""
+"""Bounded Actions control plane for the Polymarket 15m x 7 dataset."""
 
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import hashlib
 import json
 import os
@@ -17,18 +16,29 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlsplit
+
+import pyarrow.parquet as pq
 
 from canonical_data.audit import canonical_json_bytes
-from canonical_data.planner import build_backfill_plan
+from canonical_data.discovery import GammaClient
+from canonical_data.errors import IdentityError, UnresolvedMarketError
+from canonical_data.models import Asset
+from canonical_data.planner import build_backfill_plan, release_bucket
+from canonical_data.quality import classify
+from scripts.run_backfill import (
+    DATASET_RELEASE_PREFIX,
+    REPOSITORY,
+    _fetch_gamma,
+)
 
-REPOSITORY = "atalaydor/polymarket-doge-bnb-hype-canonical-data"
 API = f"https://api.github.com/repos/{REPOSITORY}"
-PLAN_START = date(2026, 4, 5)
-PLAN_END = date(2026, 8, 7)
+CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v1"
+AUTHORITY_PATH = Path("config/production-plan.json")
+CANARY_RECEIPT_PATH = Path("config/canary-receipt.json")
+LEDGER_PATH = Path("config/backfill-ledger.json")
 EXPECTED_FILES = {
     "book-200ms.parquet",
     "book-events.parquet",
@@ -37,47 +47,22 @@ EXPECTED_FILES = {
     "markets.parquet",
     "underlying.parquet",
 }
-CANARY_PARTITIONS = (
-    "HYPE/5m/2026-05-23",  # durable normal-production no-op
-    "DOGE/5m/2026-05-25",  # durable GitHub TLS-retry/no-op class
-    "HYPE/5m/2026-05-30",  # checkout-TLS job never entered production
-    "BNB/5m/2026-06-01",  # durable explicit EXCLUDED no-op
-    "DOGE/5m/2026-06-03",
-    "BNB/5m/2026-06-03",
-    "HYPE/5m/2026-06-03",
-    "DOGE/5m/2026-06-04",
-    "BNB/5m/2026-06-04",
-    "HYPE/5m/2026-06-04",
-    "DOGE/5m/2026-06-05",
-    "BNB/5m/2026-06-05",
-    "HYPE/5m/2026-06-05",
-)
 ASSET_PATTERN = re.compile(
-    r"^(DOGE|BNB|HYPE)--5m--(\d{4}-\d{2}-\d{2})--([0-9a-f]{64})--(.+)$"
+    r"^(BTC|ETH|SOL|XRP|DOGE|BNB|HYPE)--15m--"
+    r"(\d{4}-\d{2}-\d{2})--([0-9a-f]{64})--(.+)$"
 )
-KACHO_REVISION = "f646aa62c6ffe3873fefb9f4a9b4ef7df0f5b4e5"
-KACHO_TICKS = {
-    "DOGE": (
-        "doge_ticks.parquet",
-        "7fabd65d9af567ca39ac520f4e7ee749d059f8574aa3f53ea5d3db37a3707cee.source",
-        "7fabd65d9af567ca39ac520f4e7ee749d059f8574aa3f53ea5d3db37a3707cee",
-        80_060_676,
-    ),
-    "BNB": (
-        "bnb_ticks.parquet",
-        "1958c9643a15add7620703329f47d3f67d8ff4c5c8d6115696bc745fb866478e.source",
-        "1958c9643a15add7620703329f47d3f67d8ff4c5c8d6115696bc745fb866478e",
-        76_690_643,
-    ),
-    "HYPE": (
-        "hype_ticks.parquet",
-        "f99e833ba91bde2406d288b3419d502db396282749e5c07125c01ee4ebbe3dd6.source",
-        "f99e833ba91bde2406d288b3419d502db396282749e5c07125c01ee4ebbe3dd6",
-        74_977_804,
-    ),
-}
 TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 TRANSFER_RETRY_DELAYS = (2, 8, 32)
+
+
+@dataclass(frozen=True)
+class Authority:
+    start: datetime
+    cutoff: datetime
+    assets: tuple[Asset, ...]
+    canary_search_start: datetime
+    canary_search_end: datetime
+    canary_step_minutes: int
 
 
 @dataclass(frozen=True)
@@ -96,7 +81,7 @@ def _request(url: str, accept: str = "application/vnd.github+json") -> bytes:
     token = os.environ.get("GITHUB_TOKEN", "")
     headers = {
         "Accept": accept,
-        "User-Agent": "chapter-4-actions-backend/1.0",
+        "User-Agent": "polymarket-15m-seven-actions/1.0",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     if token:
@@ -125,12 +110,106 @@ def _json(url: str) -> Any:
     return json.loads(_request(url))
 
 
-def remote_inventory() -> dict[str, list[RemoteAsset]]:
-    releases = _json(f"{API}/releases?per_page=100")
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise RuntimeError("authority timestamps must be UTC")
+    return parsed.astimezone(UTC)
+
+
+def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
+    raw = json.loads(path.read_bytes())
+    expected_assets = tuple(Asset)
+    assets = tuple(Asset(item) for item in raw["partition"]["assets"])
+    if raw.get("dataset_id") != "polymarket-15m-seven-v1":
+        raise RuntimeError("production plan has the wrong dataset identity")
+    if raw["partition"].get("timeframe") != "15m" or assets != expected_assets:
+        raise RuntimeError("production plan is not exactly the frozen 15m x 7 scope")
+    if raw["publication"].get("release_prefix") != DATASET_RELEASE_PREFIX:
+        raise RuntimeError("production release namespace is not frozen")
+    search = raw["canary"]["search"]
+    authority = Authority(
+        _parse_utc(raw["coverage_start"]),
+        _parse_utc(raw["release_cutoff"]),
+        assets,
+        _parse_utc(search["start"]),
+        _parse_utc(search["end"]),
+        int(search["step_minutes"]),
+    )
+    if authority.cutoff <= authority.start:
+        raise RuntimeError("release cutoff must follow release start")
+    if authority.canary_search_start < authority.canary_search_end:
+        raise RuntimeError("canary search must run newest to oldest")
+    if authority.canary_step_minutes not in {15, 30, 60}:
+        raise RuntimeError("canary search step is outside the finite allowed set")
+    return authority
+
+
+def _full_plan(authority: Authority) -> list[dict[str, Any]]:
+    final_day = (authority.cutoff - timedelta(microseconds=1)).date()
+    return build_backfill_plan(authority.start.date(), final_day)
+
+
+def _control_plane_digest() -> str:
+    tracked = subprocess.check_output(["git", "ls-files", "-z"], encoding="utf-8").split("\0")
+    excluded = {"config/backfill-ledger.json", "config/canary-receipt.json"}
+    digest = hashlib.sha256()
+    for name in sorted(item for item in tracked if item and item not in excluded):
+        path = Path(name)
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
+    if not CANARY_RECEIPT_PATH.exists():
+        raise RuntimeError("full planning is locked until the one canary receipt is committed")
+    receipt = json.loads(CANARY_RECEIPT_PATH.read_bytes())
+    if (
+        receipt.get("status") != "PASSED"
+        or receipt.get("dataset_id") != "polymarket-15m-seven-v1"
+        or receipt.get("timeframe") != "15m"
+        or receipt.get("assets") != [asset.value for asset in authority.assets]
+        or receipt.get("unexplained_failures") != 0
+        or receipt.get("authenticated_no_op_partitions") != len(authority.assets)
+        or receipt.get("settlement_bindings") != len(authority.assets)
+        or receipt.get("legitimate_exclusion_contract_checks") != len(authority.assets)
+        or receipt.get("shared_source_transfer_owners") != 1
+        or int(receipt.get("shared_pmxt_objects", 0)) < 1
+        or int(receipt.get("source_transfer_bytes", 0)) < 1
+        or int(receipt.get("canonical_bytes", 0)) < 1
+        or receipt.get("isolated_from_production") is not True
+        or float(receipt.get("timeout_margin_seconds", 0)) <= 3_600
+        or int(receipt.get("peak_rss_kib", 0)) < 1
+        or int(receipt.get("minimum_free_disk_bytes", 0)) < 8_000_000_000
+        or receipt.get("control_plane_sha256") != _control_plane_digest()
+    ):
+        raise RuntimeError("canary receipt does not authorize the frozen full plan")
+    return cast(dict[str, Any], receipt)
+
+
+def remote_inventory(
+    release_prefix: str = DATASET_RELEASE_PREFIX,
+    exact_tags: set[str] | None = None,
+) -> dict[str, list[RemoteAsset]]:
     result: dict[str, list[RemoteAsset]] = {}
+    releases = []
+    for page in range(1, 11):
+        batch = _json(f"{API}/releases?per_page=100&page={page}")
+        releases.extend(batch)
+        if len(batch) < 100:
+            break
+    else:
+        raise RuntimeError("release inventory exceeded bounded pagination")
     for release in releases:
         release_tag = str(release.get("tag_name", ""))
-        if not release_tag.startswith("dataset-v1-"):
+        if exact_tags is not None:
+            selected = release_tag in exact_tags
+        else:
+            selected = release_tag.startswith(f"{release_prefix}-")
+        if not selected:
             continue
         release_id = int(release["id"])
         for page in range(1, 11):
@@ -139,10 +218,11 @@ def remote_inventory() -> dict[str, list[RemoteAsset]]:
                 match = ASSET_PATTERN.fullmatch(str(item["name"]))
                 if match is None:
                     raise RuntimeError(
-                        f"dataset release contains a noncanonical asset name: {item['name']}"
+                        f"15m release contains a noncanonical asset name: {item['name']}"
                     )
-                partition = f"{match[1]}/5m/{match[2]}"
-                if release_tag != f"dataset-v1-{match[2][:7]}":
+                partition = f"{match[1]}/15m/{match[2]}"
+                expected_tag = f"{release_prefix}-{release_bucket(date.fromisoformat(match[2]))}"
+                if exact_tags is None and release_tag != expected_tag:
                     raise RuntimeError(f"partition is published in the wrong release: {partition}")
                 result.setdefault(partition, []).append(
                     RemoteAsset(
@@ -176,39 +256,19 @@ def verified_partitions(inventory: dict[str, list[RemoteAsset]]) -> set[str]:
     return verified
 
 
-def select_proof_partition(
-    ledger: dict[str, Any], inventory: dict[str, list[RemoteAsset]]
-) -> str:
-    plan = build_backfill_plan(PLAN_START, PLAN_END)
-    completed = int(ledger["completed"])
-    if completed < 1 or completed > len(plan):
-        raise RuntimeError("ledger completed count is outside the finite plan")
+def unfinished_plan(
+    inventory: dict[str, list[RemoteAsset]], authority: Authority | None = None
+) -> list[dict[str, Any]]:
+    selected = authority or load_authority()
     complete = verified_partitions(inventory)
-    if completed != len(complete):
-        raise RuntimeError("ledger completed count does not match durable remote evidence")
-    requested = str(ledger.get("last_partition", ""))
-    if requested not in {str(item["partition_id"]) for item in plan}:
-        raise RuntimeError("ledger proof partition is outside the finite plan")
-    if requested not in complete:
-        raise RuntimeError(
-            f"ledger proof partition lacks durable remote evidence: {requested}"
-        )
-    return requested
+    return [item for item in _full_plan(selected) if item["partition_id"] not in complete]
 
 
-def unfinished_plan(inventory: dict[str, list[RemoteAsset]]) -> list[dict[str, Any]]:
-    complete = verified_partitions(inventory)
-    return [
-        item
-        for item in build_backfill_plan(PLAN_START, PLAN_END)
-        if item["partition_id"] not in complete
-    ]
-
-
-def inventory_anomalies(inventory: dict[str, list[RemoteAsset]]) -> dict[str, list[str]]:
-    plan_ids = {
-        str(item["partition_id"]) for item in build_backfill_plan(PLAN_START, PLAN_END)
-    }
+def inventory_anomalies(
+    inventory: dict[str, list[RemoteAsset]], authority: Authority | None = None
+) -> dict[str, list[str]]:
+    selected = authority or load_authority()
+    plan_ids = {str(item["partition_id"]) for item in _full_plan(selected)}
     verified = verified_partitions(inventory)
     partial = sorted(
         partition
@@ -221,40 +281,50 @@ def inventory_anomalies(inventory: dict[str, list[RemoteAsset]]) -> dict[str, li
         for filename in {asset.filename for asset in assets}
         if len({asset.digest for asset in assets if asset.filename == filename}) > 1
     )
+    duplicate = sorted(
+        f"{partition}/{filename}"
+        for partition, assets in inventory.items()
+        for filename in {asset.filename for asset in assets}
+        if sum(asset.filename == filename for asset in assets) > 1
+    )
+    unexpected_files = sorted(
+        f"{partition}/{asset.filename}"
+        for partition, assets in inventory.items()
+        for asset in assets
+        if asset.filename not in EXPECTED_FILES
+    )
     return {
         "partial": partial,
         "divergent": divergent,
+        "duplicate": duplicate,
+        "unexpected_files": unexpected_files,
         "out_of_plan": sorted(set(inventory) - plan_ids),
     }
 
 
+def _fatal_inventory_anomalies(anomalies: dict[str, list[str]]) -> bool:
+    return any(values for name, values in anomalies.items() if name != "partial")
+
+
 def day_plan(plan: list[dict[str, Any]]) -> list[dict[str, str]]:
     return [
-        {"day": day}
-        for day in sorted({str(item["partition_id"]).split("/")[2] for item in plan})
+        {"day": day} for day in sorted({str(item["partition_id"]).split("/")[2] for item in plan})
     ]
 
 
-def matrix_stages(plan: list[dict[str, Any]]) -> list[dict[str, list[dict[str, str]]]]:
-    stages = []
-    days = day_plan(plan)
-    for offset in range(0, len(days), 256):
-        include = days[offset : offset + 256]
-        stages.append({"include": include})
-    return stages or [{"include": []}]
-
-
-def _download_verify(asset: RemoteAsset, directory: Path) -> None:
+def _download_verify(asset: RemoteAsset, directory: Path) -> Path:
     target = directory / asset.filename
     target.write_bytes(_request(asset.url, "application/octet-stream"))
     payload = target.read_bytes()
     if len(payload) != asset.size or hashlib.sha256(payload).hexdigest() != asset.digest:
         raise RuntimeError(f"remote digest verification failed: {asset.name}")
+    return target
 
 
 def verify_remote_partition(
     partition: str, inventory: dict[str, list[RemoteAsset]]
 ) -> dict[str, Any]:
+    expected_asset = partition.split("/", 1)[0]
     assets = inventory.get(partition, [])
     if partition not in verified_partitions(inventory):
         raise RuntimeError(f"partition is not durably complete: {partition}")
@@ -262,94 +332,41 @@ def verify_remote_partition(
         directory = Path(temporary)
         for asset in sorted(assets, key=lambda item: item.filename):
             _download_verify(asset, directory)
-        manifest = json.loads((directory / "manifest.json").read_bytes())
-        if manifest["partition_id"] != partition:
-            raise RuntimeError("remote manifest partition identity mismatch")
+        payload = (directory / "manifest.json").read_bytes()
+        manifest = json.loads(payload)
+        if canonical_json_bytes(manifest) != payload:
+            raise RuntimeError("remote manifest is not canonical JSON")
+        if (
+            manifest.get("dataset_id") != "polymarket-15m-seven-v1"
+            or manifest.get("partition_id") != partition
+            or manifest.get("timeframe") != "15m"
+        ):
+            raise RuntimeError("remote manifest identity mismatch")
+        market_rows = pq.read_table(directory / "markets.parquet").to_pylist()
+        for row in market_rows:
+            if (
+                row["asset"] != expected_asset
+                or row["timeframe"] != "15m"
+                or row["market_end_ns"] - row["market_start_ns"] != 900_000_000_000
+                or row["official_outcome"] not in {"UP", "DOWN", "SPLIT"}
+                or not str(row["resolution_source_url"]).startswith(
+                    "https://data.chain.link/streams/"
+                )
+            ):
+                raise RuntimeError("remote market lacks frozen 15m settlement semantics")
     return {
         "partition_id": partition,
         "result": "VERIFIED_NO_OP",
         "assets": len(assets),
         "bytes": sum(asset.size for asset in assets),
+        "markets": len(market_rows),
+        "quality": manifest["quality_tier"],
+        "manifest_sha256": hashlib.sha256(payload).hexdigest(),
+        "pmxt_urls": sorted(
+            item["source_url"] for item in manifest["provenance"] if item["source_id"] == "pmxt_v2"
+        ),
         "authenticated_redownload": bool(os.environ.get("GITHUB_TOKEN")),
     }
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1_048_576):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def kacho_required(day: str) -> bool:
-    return date.fromisoformat(day) <= date(2026, 5, 18)
-
-
-def _raise_child_failure(completed: subprocess.CompletedProcess[str]) -> None:
-    if not completed.returncode:
-        return
-    sys.stdout.write(completed.stdout)
-    sys.stderr.write(completed.stderr)
-    raise RuntimeError(f"one-partition executor failed with exit code {completed.returncode}")
-
-
-def acquire_kacho(asset: str, root: Path) -> int:
-    source_name, target_name, expected_digest, expected_bytes = KACHO_TICKS[asset]
-    root.mkdir(parents=True, exist_ok=True)
-    target = root / target_name
-    url = (
-        "https://huggingface.co/datasets/kachoio/"
-        "polymarket-5-minute-crypto-up-down-markets/resolve/"
-        f"{KACHO_REVISION}/{source_name}"
-    )
-    request = urllib.request.Request(url, headers={"User-Agent": "chapter-4-actions-backend/1.0"})
-    last_error: Exception | None = None
-    for attempt, delay in enumerate((0, *TRANSFER_RETRY_DELAYS)):
-        if delay:
-            time.sleep(delay)
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response, target.open(
-                "wb"
-            ) as handle:
-                shutil.copyfileobj(response, handle, 1_048_576)
-                status = int(response.status)
-                content_type = response.headers.get_content_type()
-                content_length = response.headers.get("Content-Length")
-                etag = response.headers.get("ETag")
-                response_host = urlsplit(response.geturl()).hostname
-            break
-        except urllib.error.HTTPError as exc:
-            target.unlink(missing_ok=True)
-            if exc.code not in TRANSIENT_HTTP_STATUS:
-                raise
-            last_error = exc
-        except (urllib.error.URLError, TimeoutError) as exc:
-            target.unlink(missing_ok=True)
-            last_error = exc
-        if attempt == len(TRANSFER_RETRY_DELAYS):
-            assert last_error is not None
-            raise last_error
-    actual_bytes = target.stat().st_size
-    actual_digest = _sha256(target)
-    if actual_bytes != expected_bytes or actual_digest != expected_digest:
-        diagnostics = {
-            "source": source_name,
-            "revision": KACHO_REVISION,
-            "status": status,
-            "response_host": response_host,
-            "content_type": content_type,
-            "content_length": content_length,
-            "etag": etag,
-            "expected_bytes": expected_bytes,
-            "actual_bytes": actual_bytes,
-            "expected_sha256": expected_digest,
-            "actual_sha256": actual_digest,
-        }
-        raise RuntimeError(
-            f"Kacho source integrity mismatch: {json.dumps(diagnostics, sort_keys=True)}"
-        )
-    return actual_bytes
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -358,84 +375,41 @@ def _atomic_json(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 
 
-def remote_manifest(partition: str, inventory: dict[str, list[RemoteAsset]]) -> dict[str, Any]:
-    assets = inventory.get(partition, [])
-    manifests = [asset for asset in assets if asset.filename == "manifest.json"]
-    if len(manifests) != 1 or partition not in verified_partitions(inventory):
-        raise RuntimeError(f"partition lacks one durable complete manifest: {partition}")
-    with tempfile.TemporaryDirectory() as temporary:
-        directory = Path(temporary)
-        _download_verify(manifests[0], directory)
-        manifest = json.loads((directory / "manifest.json").read_bytes())
-    if manifest.get("partition_id") != partition:
-        raise RuntimeError("remote manifest partition identity mismatch")
-    return cast(dict[str, Any], manifest)
-
-
 def reconcile_ledger(
-    inventory: dict[str, list[RemoteAsset]], last_partition: str | None = None
+    inventory: dict[str, list[RemoteAsset]], authority: Authority | None = None
 ) -> dict[str, Any]:
-    path = Path("config/backfill-ledger.json")
-    ledger = json.loads(path.read_bytes())
+    selected = authority or load_authority()
+    anomalies = inventory_anomalies(inventory, selected)
+    if _fatal_inventory_anomalies(anomalies):
+        raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
     complete = verified_partitions(inventory)
-    plan_ids = {str(item["partition_id"]) for item in build_backfill_plan(PLAN_START, PLAN_END)}
-    if not complete <= plan_ids:
-        raise RuntimeError("durable inventory contains an out-of-plan partition")
-    summaries = cast(dict[str, dict[str, Any]], ledger.setdefault("partitions", {}))
-    for partition in tuple(summaries):
-        if partition not in complete:
-            del summaries[partition]
-    for partition in complete & summaries.keys():
-        remote_digest = next(
-            asset.digest
-            for asset in inventory[partition]
-            if asset.filename == "manifest.json"
+    partitions: dict[str, Any] = {}
+    for partition in sorted(complete):
+        manifest_asset = next(
+            asset for asset in inventory[partition] if asset.filename == "manifest.json"
         )
-        if summaries[partition].get("manifest_sha256") != remote_digest:
-            raise RuntimeError(
-                f"ledger manifest digest diverges from remote authority: {partition}"
-            )
-    missing = sorted(complete - summaries.keys())
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        downloaded = dict(
-            zip(
-                missing,
-                pool.map(lambda item: remote_manifest(item, inventory), missing),
-                strict=True,
-            )
-        )
-    for partition, manifest in downloaded.items():
-        summaries[partition] = {
-            "quality": str(manifest["quality_tier"]),
-            "manifest_sha256": next(
-                asset.digest
-                for asset in inventory[partition]
-                if asset.filename == "manifest.json"
-            ),
+        with tempfile.TemporaryDirectory() as temporary:
+            path = _download_verify(manifest_asset, Path(temporary))
+            manifest = json.loads(path.read_bytes())
+        partitions[partition] = {
+            "manifest_sha256": manifest_asset.digest,
+            "quality": manifest["quality_tier"],
+            "release_tag": manifest_asset.release_tag,
         }
-    qualities = [str(summaries[partition]["quality"]) for partition in complete]
-    ledger["completed"] = len(complete)
-    ledger["tier_a"] = qualities.count("TIER_A")
-    ledger["tier_b"] = qualities.count("TIER_B")
-    ledger["excluded"] = qualities.count("EXCLUDED")
-    if sum(ledger[key] for key in ("tier_a", "tier_b", "excluded")) != len(complete):
-        raise RuntimeError("remote manifest contains an unsupported quality tier")
-    if last_partition is not None:
-        if last_partition not in complete:
-            raise RuntimeError("last partition lacks durable remote authority")
-        ledger["last_partition"] = last_partition
-    elif ledger.get("last_partition") not in complete:
-        ledger["last_partition"] = sorted(complete)[-1] if complete else None
-    remaining = unfinished_plan(inventory)
-    ledger["continuation_partition"] = (
-        remaining[0]["partition_id"] if remaining else None
-    )
-    ledger["measured_canonical_bytes"] = sum(
-        asset.size for partition in complete for asset in inventory[partition]
-    )
-    ledger["remote_assets"] = sum(len(items) for items in inventory.values())
-    _atomic_json(path, ledger)
-    return cast(dict[str, Any], ledger)
+    plan = _full_plan(selected)
+    unfinished = [
+        str(item["partition_id"]) for item in plan if item["partition_id"] not in complete
+    ]
+    return {
+        "schema_version": "1.0.0",
+        "dataset_id": "polymarket-15m-seven-v1",
+        "planned": len(plan),
+        "completed": len(complete),
+        "unfinished": len(unfinished),
+        "continuation_partition": unfinished[0] if unfinished else None,
+        "partitions": partitions,
+        "durable_identity": "remote content-addressed assets plus embedded manifests",
+    }
 
 
 def _write_output(name: str, value: str) -> None:
@@ -446,235 +420,277 @@ def _write_output(name: str, value: str) -> None:
 
 
 def command_plan() -> None:
+    authority = load_authority()
+    _require_canary_receipt(authority)
     inventory = remote_inventory()
-    complete = verified_partitions(inventory)
-    plan = unfinished_plan(inventory)
-    stages = matrix_stages(plan)
-    report = {
-        "planned": 375,
-        "verified": len(complete),
-        "unfinished": len(plan),
-        "verified_in_plan": sum(item["partition_id"] in complete for item in plan),
-        "unique_unfinished": len({item["partition_id"] for item in plan}),
-        "stages": [len(stage["include"]) for stage in stages],
-        "production_unit": "same-day unfinished asset batch",
-        "days": len(day_plan(plan)),
-        "max_matrix": max(len(stage["include"]) for stage in stages),
-        "max_parallel": 1,
-        "fail_fast": False,
-        "gaps": [str(item["partition_id"]) for item in plan],
-        "anomalies": inventory_anomalies(inventory),
-    }
-    print(json.dumps(report, sort_keys=True))
-    _write_output("matrix_0", json.dumps(stages[0], separators=(",", ":")))
-    _write_output(
-        "matrix_1",
-        json.dumps(stages[1] if len(stages) > 1 else {"include": []}, separators=(",", ":")),
+    anomalies = inventory_anomalies(inventory, authority)
+    if _fatal_inventory_anomalies(anomalies):
+        raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
+    unfinished = unfinished_plan(inventory, authority)
+    days = day_plan(unfinished)
+    if len(days) > 256:
+        raise RuntimeError("finite plan exceeds the single bounded Actions matrix")
+    matrix = json.dumps({"include": days}, separators=(",", ":"))
+    _write_output("matrix", matrix)
+    print(
+        json.dumps(
+            {
+                "planned_partitions": len(_full_plan(authority)),
+                "durable_partitions": len(verified_partitions(inventory)),
+                "unfinished_partitions": len(unfinished),
+                "utc_days": len(days),
+                "matrix": json.loads(matrix),
+            },
+            sort_keys=True,
+        )
     )
-    _write_output("unfinished", str(len(plan)))
 
 
-def command_proof() -> None:
-    began = time.monotonic()
+def _raise_child_failure(completed: subprocess.CompletedProcess[str]) -> None:
+    if completed.returncode == 0:
+        return
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
+    raise RuntimeError(f"15m executor failed with exit code {completed.returncode}")
+
+
+def command_execute_day(day_text: str) -> None:
+    authority = load_authority()
+    _require_canary_receipt(authority)
+    day = date.fromisoformat(day_text)
+    plan_for_day = [item for item in _full_plan(authority) if item["day"] == day_text]
+    if not plan_for_day:
+        raise RuntimeError("requested UTC day is outside the frozen plan")
     inventory = remote_inventory()
-    ledger = json.loads(Path("config/backfill-ledger.json").read_bytes())
-    partition = select_proof_partition(ledger, inventory)
-    report = verify_remote_partition(partition, inventory)
-    report["wall_seconds"] = time.monotonic() - began
-    print(json.dumps(report, sort_keys=True))
-
-
-def command_execute_day(
-    day: str, requested_assets: tuple[str, ...] | None = None
-) -> list[dict[str, Any]]:
-    before = remote_inventory()
-    date.fromisoformat(day)
-    valid = {str(item["partition_id"]) for item in unfinished_plan(before)}
-    candidates = requested_assets or ("DOGE", "BNB", "HYPE")
-    assets = [asset for asset in candidates if f"{asset}/5m/{day}" in valid]
+    anomalies = inventory_anomalies(inventory, authority)
+    if _fatal_inventory_anomalies(anomalies):
+        raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
+    complete = verified_partitions(inventory)
+    assets = tuple(
+        Asset(str(item["asset"])) for item in plan_for_day if item["partition_id"] not in complete
+    )
     if not assets:
-        proofs = [
-            verify_remote_partition(f"{asset}/5m/{day}", before)
-            for asset in candidates
-            if f"{asset}/5m/{day}" in verified_partitions(before)
-        ]
-        for proof in proofs:
-            print(json.dumps(proof, sort_keys=True))
-        return proofs
+        print(json.dumps({"day": day_text, "result": "AUTHENTICATED_NO_OP"}))
+        return
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        kacho_bytes = sum(
-            acquire_kacho(asset, root / "kacho") for asset in assets
-        ) if kacho_required(day) else 0
-        detailed = root / "partition-ledger.json"
-        command = [
-            "python",
-            "scripts/run_backfill.py",
-            "--kacho-root",
-            str(root / "kacho"),
-            "--work-root",
-            str(root / "work"),
-            "--ledger",
-            str(detailed),
-            "--start",
-            day,
-            "--end",
-            day,
-            "--assets",
-            ",".join(assets),
-        ]
-        samples = {"peak_work_bytes": 0, "minimum_free_disk_bytes": shutil.disk_usage(root).free}
-        stopped = threading.Event()
-
-        def sample_disk() -> None:
-            while not stopped.wait(1):
-                used = 0
-                for path in root.rglob("*"):
-                    try:
-                        if path.is_file():
-                            used += path.stat().st_size
-                    except FileNotFoundError:
-                        # The child removes verified temporary inputs concurrently.
-                        continue
-                samples["peak_work_bytes"] = max(samples["peak_work_bytes"], used)
-                samples["minimum_free_disk_bytes"] = min(
-                    samples["minimum_free_disk_bytes"], shutil.disk_usage(root).free
-                )
-
-        sampler = threading.Thread(target=sample_disk, daemon=True)
-        sampler.start()
-        began = time.monotonic()
-        try:
-            completed = subprocess.run(command, check=False, text=True, capture_output=True)
-        finally:
-            stopped.set()
-            sampler.join()
-        wall = time.monotonic() - began
-        if completed.returncode:
-            # A preceding asset in the same process may already be durably published.
-            reconcile_ledger(remote_inventory())
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_backfill.py",
+                "--work-root",
+                str(root / "work"),
+                "--ledger",
+                str(root / "ledger.json"),
+                "--start",
+                day.isoformat(),
+                "--end",
+                day.isoformat(),
+                "--coverage-start",
+                authority.start.isoformat(),
+                "--cutoff",
+                authority.cutoff.isoformat(),
+                "--assets",
+                ",".join(asset.value for asset in assets),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
         _raise_child_failure(completed)
-        lines = [line for line in completed.stdout.splitlines() if line.startswith("{")]
-        if len(lines) != len(assets):
-            raise RuntimeError("day executor did not return exactly one result per asset")
-        results = [json.loads(line) for line in lines]
-        for result in results:
-            result["kacho_transfer_bytes"] = kacho_bytes
-            result["actions_day_wall_seconds"] = wall
-            result.update(samples)
-            result["timeout_margin_seconds"] = 21_600 - wall
-            print(json.dumps(result, sort_keys=True))
-    after = remote_inventory()
-    for result in results:
-        proof = verify_remote_partition(str(result["partition_id"]), after)
-        print(json.dumps(proof, sort_keys=True))
-    reconcile_ledger(after, str(results[-1]["partition_id"]))
-    return results
+        sys.stdout.write(completed.stdout)
+    refreshed = remote_inventory()
+    for asset in assets:
+        verify_remote_partition(f"{asset.value}/15m/{day_text}", refreshed)
+    _atomic_json(LEDGER_PATH, reconcile_ledger(refreshed, authority))
+
+
+def _candidate_starts(authority: Authority) -> list[int]:
+    current = authority.canary_search_start
+    result = []
+    while current >= authority.canary_search_end:
+        timestamp = int(current.timestamp())
+        if timestamp % 900:
+            raise RuntimeError("canary search boundaries must be 15m aligned")
+        result.append(timestamp)
+        current -= timedelta(minutes=authority.canary_step_minutes)
+    if not result or len(result) > 192:
+        raise RuntimeError("canary candidate search is empty or exceeds its finite cap")
+    return result
+
+
+def find_canary_start(authority: Authority) -> tuple[int, dict[Asset, Any], int]:
+    gamma = GammaClient(fetch=_fetch_gamma)
+    attempts = 0
+    for start in _candidate_starts(authority):
+        markets: dict[Asset, Any] = {}
+        rejected = False
+        for asset in authority.assets:
+            attempts += 1
+            try:
+                market, _, _ = gamma.fetch_market(asset, start)
+            except (IdentityError, UnresolvedMarketError):
+                rejected = True
+                break
+            if (
+                market.timeframe != "15m"
+                or market.market_start_ns != start * 1_000_000_000
+                or market.market_end_ns - market.market_start_ns != 900_000_000_000
+            ):
+                raise RuntimeError("Gamma candidate violates exact 15m identity")
+            markets[asset] = market
+        if not rejected and len(markets) == len(authority.assets):
+            return start, markets, attempts
+    raise RuntimeError("bounded Gamma search found no resolved common 15m window for all assets")
 
 
 def command_canary() -> None:
+    if not os.environ.get("GITHUB_TOKEN"):
+        raise RuntimeError("canary requires authenticated GitHub remote authority")
+    authority = load_authority()
     began = time.monotonic()
-    for day in sorted({partition.split("/")[2] for partition in CANARY_PARTITIONS}):
-        requested = tuple(
-            partition.split("/")[0]
-            for partition in CANARY_PARTITIONS
-            if partition.endswith(f"/{day}")
-        )
-        command_execute_day(day, requested)
-    inventory = remote_inventory()
-    outcomes = []
-    for partition in CANARY_PARTITIONS:
-        proof = verify_remote_partition(partition, inventory)
-        quality = str(remote_manifest(partition, inventory)["quality_tier"])
-        outcomes.append({"partition_id": partition, "quality": quality, **proof})
-        # A second authenticated verification is the required no-op rerun proof.
-        verify_remote_partition(partition, inventory)
-    report = {
-        "canary_partitions": len(outcomes),
-        "assets": sorted({item.split("/")[0] for item in CANARY_PARTITIONS}),
-        "dates": len({item.split("/")[2] for item in CANARY_PARTITIONS}),
-        "success": sum(item["quality"] != "EXCLUDED" for item in outcomes),
-        "excluded": sum(item["quality"] == "EXCLUDED" for item in outcomes),
-        "unexplained_failures": 0,
-        "authenticated_no_op_reruns": len(outcomes),
-        "wall_seconds": time.monotonic() - began,
-    }
-    print(json.dumps(report, sort_keys=True))
+    disk_before = shutil.disk_usage(Path.cwd()).free
+    production_before = remote_inventory()
+    start, markets, gamma_attempts = find_canary_start(authority)
+    day = datetime.fromtimestamp(start, UTC).date()
+    cutoff = datetime.fromtimestamp(start + 900, UTC)
+    release_prefix = f"{CANARY_RELEASE_PREFIX}-{start}"
+    release_tag = f"{release_prefix}-{release_bucket(day)}"
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        ledger_path = root / "ledger.json"
+        minimum_free_disk = disk_before
+        stop_sampling = threading.Event()
 
+        def sample_disk() -> None:
+            nonlocal minimum_free_disk
+            while not stop_sampling.wait(1):
+                minimum_free_disk = min(minimum_free_disk, shutil.disk_usage(root).free)
 
-def command_certify() -> None:
-    inventory = remote_inventory()
-    anomalies = inventory_anomalies(inventory)
-    complete = verified_partitions(inventory)
-    if len(complete) != 375 or any(anomalies.values()):
-        raise RuntimeError(
-            "Chapter 4 certification requires exactly 375 durable partitions and no anomalies"
-        )
-    ledger = reconcile_ledger(inventory)
-    if int(ledger["completed"]) != 375 or ledger["continuation_partition"] is not None:
-        raise RuntimeError("reconciled ledger is not complete")
-    report = {
+        sampler = threading.Thread(target=sample_disk, daemon=True)
+        sampler.start()
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/run_backfill.py",
+                    "--work-root",
+                    str(root / "work"),
+                    "--ledger",
+                    str(ledger_path),
+                    "--start",
+                    day.isoformat(),
+                    "--end",
+                    day.isoformat(),
+                    "--coverage-start",
+                    datetime.fromtimestamp(start, UTC).isoformat(),
+                    "--cutoff",
+                    cutoff.isoformat(),
+                    "--market-starts",
+                    str(start),
+                    "--release-prefix",
+                    release_prefix,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        finally:
+            stop_sampling.set()
+            sampler.join()
+        _raise_child_failure(completed)
+        sys.stdout.write(completed.stdout)
+        ledger = json.loads(ledger_path.read_bytes())
+    if len(ledger["partitions"]) != len(authority.assets):
+        raise RuntimeError("canary did not execute exactly seven isolated partitions")
+    if any(item["markets"] != 1 for item in ledger["partitions"].values()):
+        raise RuntimeError("canary did not bind one actual market for every asset")
+    if any(item["quality"] != "TIER_A" for item in ledger["partitions"].values()):
+        raise RuntimeError("canary requires usable PMXT evidence for every asset")
+
+    canary_inventory = remote_inventory(exact_tags={release_tag})
+    proofs = []
+    for asset in authority.assets:
+        partition = f"{asset.value}/15m/{day.isoformat()}"
+        proof = verify_remote_partition(partition, canary_inventory)
+        if proof["markets"] != 1 or not proof["authenticated_redownload"]:
+            raise RuntimeError("canary publication proof is incomplete")
+        proofs.append(proof)
+        verify_remote_partition(partition, canary_inventory)
+    common_pmxt_urls = set(proofs[0]["pmxt_urls"])
+    if not common_pmxt_urls or any(set(proof["pmxt_urls"]) != common_pmxt_urls for proof in proofs):
+        raise RuntimeError("seven assets do not share one PMXT acquisition inventory")
+    if remote_inventory() != production_before:
+        raise RuntimeError("isolated canary publication changed production authority")
+
+    exclusion_checks = 0
+    for market in markets.values():
+        tier, exclusion = classify(market, False, [(market.market_start_ns, market.market_end_ns)])
+        if tier.value != "EXCLUDED" or exclusion is None or not exclusion.evidence:
+            raise RuntimeError("fail-closed exclusion contract lacks actual-market evidence")
+        exclusion_checks += 1
+    wall_seconds = time.monotonic() - began
+    disk_after = shutil.disk_usage(Path.cwd()).free
+    source_bytes = sum(int(item["source_bytes"]) for item in ledger["partitions"].values())
+    source_owners = sum(int(item["source_bytes"]) > 0 for item in ledger["partitions"].values())
+    if source_owners != 1:
+        raise RuntimeError("shared PMXT transfer was not charged exactly once")
+    receipt: dict[str, Any] = {
         "schema_version": "1.0.0",
-        "chapter": 4,
-        "status": "CERTIFIED",
-        "certified_at": datetime.now(UTC).isoformat(),
-        "release_cutoff": "2026-08-07T15:00:00Z",
-        "planned": 375,
-        "durable": 375,
-        "tier_a": int(ledger["tier_a"]),
-        "tier_b": int(ledger["tier_b"]),
-        "excluded": int(ledger["excluded"]),
-        "unfinished": 0,
-        "remote_assets": sum(len(items) for items in inventory.values()),
-        "release_tags": sorted(
-            {
-                asset.release_tag
-                for assets in inventory.values()
-                for asset in assets
-                if asset.release_tag is not None
-            }
-        ),
-        "anomalies": anomalies,
-        "durable_identity": "content-addressed asset names and embedded partition manifests",
-        "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        "dataset_id": "polymarket-15m-seven-v1",
+        "status": "PASSED",
+        "timeframe": "15m",
+        "assets": [asset.value for asset in authority.assets],
+        "market_start": datetime.fromtimestamp(start, UTC).isoformat(),
+        "market_end": cutoff.isoformat(),
+        "release_tag": release_tag,
+        "isolated_from_production": True,
+        "gamma_requests": gamma_attempts,
+        "settlement_bindings": len(markets),
+        "shared_pmxt_objects": len(common_pmxt_urls),
+        "shared_source_transfer_owners": source_owners,
+        "source_transfer_bytes": source_bytes,
+        "canonical_bytes": sum(int(proof["bytes"]) for proof in proofs),
+        "authenticated_no_op_partitions": len(proofs),
+        "legitimate_exclusion_contract_checks": exclusion_checks,
+        "unexplained_failures": 0,
+        "wall_seconds": wall_seconds,
+        "timeout_margin_seconds": 21_600 - wall_seconds,
+        "peak_rss_kib": max(int(item["peak_rss_kib"]) for item in ledger["partitions"].values()),
+        "disk_free_before_bytes": disk_before,
+        "disk_free_after_bytes": disk_after,
+        "minimum_free_disk_bytes": minimum_free_disk,
+        "tool_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, encoding="utf-8"
+        ).strip(),
+        "control_plane_sha256": _control_plane_digest(),
+        "recorded_at": datetime.now(UTC).isoformat(),
     }
-    _atomic_json(Path("docs/chapter-4-certification.json"), report)
-    print(json.dumps(report, sort_keys=True))
+    if receipt["timeout_margin_seconds"] <= 3_600 or minimum_free_disk < 8_000_000_000:
+        raise RuntimeError("canary lacks six-hour timeout or disk safety margin")
+    _atomic_json(CANARY_RECEIPT_PATH, receipt)
+    print(json.dumps(receipt, sort_keys=True))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("plan")
-    commands.add_parser("proof")
     commands.add_parser("canary")
     commands.add_parser("reconcile")
-    commands.add_parser("certify")
-    execute = commands.add_parser("execute")
-    execute.add_argument("--partition")
     day = commands.add_parser("execute-day")
     day.add_argument("--day", required=True)
     args = parser.parse_args()
     if args.command == "plan":
         command_plan()
-    elif args.command == "proof":
-        command_proof()
     elif args.command == "canary":
         command_canary()
     elif args.command == "reconcile":
-        print(json.dumps(reconcile_ledger(remote_inventory()), sort_keys=True))
-    elif args.command == "certify":
-        command_certify()
-    elif args.command == "execute-day":
-        command_execute_day(args.day)
+        authority = load_authority()
+        _require_canary_receipt(authority)
+        print(json.dumps(reconcile_ledger(remote_inventory(), authority), sort_keys=True))
     else:
-        if not args.partition:
-            raise RuntimeError("--partition is required")
-        _, timeframe, requested_day = args.partition.split("/")
-        if timeframe != "5m":
-            raise RuntimeError("unsupported timeframe")
-        requested_asset = args.partition.split("/")[0]
-        command_execute_day(requested_day, (requested_asset,))
+        command_execute_day(args.day)
 
 
 if __name__ == "__main__":

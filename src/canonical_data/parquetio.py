@@ -186,7 +186,7 @@ def write_table_atomic(path: Path, schema: pa.Schema, rows: list[dict[str, Any]]
         version="2.6",
         row_group_size=65_536,
     )
-    with temporary.open("rb") as handle:
+    with temporary.open("rb+") as handle:
         os.fsync(handle.fileno())
     if path.exists() and path.read_bytes() != temporary.read_bytes():
         temporary.unlink()
@@ -225,7 +225,7 @@ class StreamingTableWriter:
 
     def finish(self) -> int:
         self.writer.close()
-        with self.temporary.open("rb") as handle:
+        with self.temporary.open("rb+") as handle:
             os.fsync(handle.fileno())
         if self.path.exists() and self.path.read_bytes() != self.temporary.read_bytes():
             self.temporary.unlink()

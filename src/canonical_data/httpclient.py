@@ -1,6 +1,6 @@
 """Stable identification for bounded public-source HTTP requests."""
 
 USER_AGENT = (
-    "polymarket-doge-bnb-hype-canonical-data/0.3 "
-    "(+https://github.com/atalaydor/polymarket-doge-bnb-hype-canonical-data)"
+    "polymarket-15m-seven-canonical-data/1.0 "
+    "(+https://github.com/atalaydor/polymarket-15m-seven-canonical-data)"
 )

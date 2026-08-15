@@ -10,7 +10,6 @@ from pathlib import Path
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.discovery import GammaClient, discover
 from canonical_data.errors import SourceError, UnresolvedMarketError
-from canonical_data.kacho import read_kacho_parquet
 from canonical_data.manifest import hash_file
 from canonical_data.models import Asset, BookEvent, Exclusion, ExclusionReason, Market, Provenance
 from canonical_data.pmxt import read_pmxt_parquet
@@ -49,7 +48,7 @@ class ProductionSourceLoader:
         provenance: list[Provenance] = []
         exclusions: list[Exclusion] = []
         for start in sorted(set(market_starts_s)):
-            slug = f"{asset.value.lower()}-updown-5m-{start}"
+            slug = f"{asset.value.lower()}-updown-15m-{start}"
             cached = self.official_cache_dir / f"{slug}.json" if self.official_cache_dir else None
             if cached is not None and cached.exists():
                 payload = cached.read_bytes()
@@ -192,26 +191,3 @@ class ProductionSourceLoader:
             transformations=("bounded_whole_object_fallback", "condition_token_filter"),
         )
         return PMXTLoad(tuple(events), (provenance,))
-
-    def load_kacho(
-        self, path: Path, markets: tuple[Market, ...]
-    ) -> tuple[list[dict[str, object]], Provenance]:
-        conditions = {market.condition_id for market in markets}
-        rows = read_kacho_parquet(
-            path,
-            conditions,
-            start_s=min(market.market_start_ns for market in markets) // 1_000_000_000,
-            end_s=max(market.market_end_ns for market in markets) // 1_000_000_000,
-        )
-        length, digest = hash_file(path)
-        provenance = Provenance(
-            source_id="kacho_5m",
-            source_url=str(path),
-            retrieved_at_ns=self.retrieved_at_ns,
-            byte_length=length,
-            sha256=digest,
-            license_id="CC0-1.0",
-            source_precision="s",
-            transformations=("condition_filter", "discard_inferred_outcome"),
-        )
-        return rows, provenance

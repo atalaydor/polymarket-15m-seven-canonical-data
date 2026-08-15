@@ -1,0 +1,95 @@
+name: Polymarket 15m x 7 finite dataset
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Bounded operation to execute
+        required: true
+        type: choice
+        options:
+          - canary
+          - full-backfill
+
+concurrency:
+  group: polymarket-15m-seven-remote-authority
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  canary:
+    if: ${{ inputs.mode == 'canary' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install frozen package and validators
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir .
+          python -m pip install --disable-pip-version-check --no-cache-dir ruff==0.12.12 mypy==1.17.1
+      - name: Validate the 15m control plane
+        run: |
+          python -m unittest discover -s tests -v
+          ruff check .
+          mypy
+          git diff --check
+      - name: Execute and reverify one isolated seven-asset canary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/actions_backend.py canary
+      - name: Commit the canary authority receipt
+        run: |
+          test -f config/canary-receipt.json
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add config/canary-receipt.json
+          git commit -m "Record Polymarket 15m x 7 canary authority"
+          git push origin HEAD:main
+
+  plan:
+    if: ${{ inputs.mode == 'full-backfill' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir .
+      - id: plan
+        name: Derive unfinished UTC days from remote authority
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/actions_backend.py plan
+
+  backfill-day:
+    if: ${{ inputs.mode == 'full-backfill' && needs.plan.outputs.matrix != '{"include":[]}' }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir .
+      - run: git pull --ff-only origin main
+      - name: Execute unfinished assets with one shared daily source pass
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/actions_backend.py execute-day --day "${{ matrix.day }}"
+      - name: Serialize the aggregate remote-authority checkpoint
+        run: |
+          if git diff --quiet -- config/backfill-ledger.json; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add config/backfill-ledger.json
+          git commit -m "Checkpoint Polymarket 15m x 7 partitions"
+          git push origin HEAD:main

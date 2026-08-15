@@ -21,7 +21,7 @@ def gamma_payload(asset: Asset = Asset.DOGE, outcome_prices: list[str] | None = 
         "markets": [
             {
                 "id": "market-1",
-                "slug": f"{symbol}-updown-5m-{START_S}",
+                "slug": f"{symbol}-updown-15m-{START_S}",
                 "conditionId": CONDITION,
                 "outcomes": json.dumps(["Up", "Down"]),
                 "clobTokenIds": json.dumps(["1", "2"]),
@@ -48,7 +48,7 @@ def market(asset: Asset = Asset.DOGE, tier: QualityTier = QualityTier.TIER_A) ->
         token_up="1",
         token_down="2",
         market_start_ns=START_NS,
-        market_end_ns=START_NS + 300_000_000_000,
+        market_end_ns=START_NS + 900_000_000_000,
         rules_text_sha256="b" * 64,
         resolution_source_url=f"https://data.chain.link/streams/{asset.value.lower()}-usd",
         official_outcome=Outcome.UP,

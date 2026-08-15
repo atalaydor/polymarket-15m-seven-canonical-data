@@ -48,6 +48,7 @@ def build_manifest(
     exclusions: Iterable[Exclusion],
     tool_commit: str,
     statistics: dict[str, Any],
+    coverage_start_ns: int,
     release_cutoff_ns: int,
 ) -> tuple[dict[str, Any], str]:
     file_entries = []
@@ -80,10 +81,11 @@ def build_manifest(
     ]
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "partition_id": f"{asset.value}/5m/{day}",
+        "dataset_id": "polymarket-15m-seven-v1",
+        "partition_id": f"{asset.value}/15m/{day}",
         "asset": asset.value,
         "venue": "polymarket",
-        "timeframe": "5m",
+        "timeframe": "15m",
         "quality_tier": tier.value,
         "files": file_entries,
         "provenance": provenance_rows,
@@ -98,6 +100,7 @@ def build_manifest(
         "tool_commit": tool_commit,
         "parameters": {"sample_interval_ms": 200, "ordering": "receive,source,object,row"},
         "statistics": statistics,
+        "coverage_start_ns": coverage_start_ns,
         "release_cutoff_ns": release_cutoff_ns,
         "exclusions": exclusion_rows,
     }

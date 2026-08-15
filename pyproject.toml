@@ -3,12 +3,12 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "polymarket-doge-bnb-hype-canonical-data"
-version = "0.3.0"
-description = "Public feasibility tooling and interchange contract for DOGE/BNB/HYPE Polymarket history"
+name = "polymarket-15m-seven-canonical-data"
+version = "1.0.0"
+description = "Canonical historical tooling for seven Polymarket 15-minute Up/Down assets"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pyarrow==21.0.0"]
+dependencies = ["pyarrow==21.0.0", "tzdata==2025.2; platform_system == 'Windows'"]
 license = {text = "License intentionally not selected pending combined-data review"}
 authors = [{name = "Project contributors"}]
 

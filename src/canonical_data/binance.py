@@ -15,6 +15,10 @@ from canonical_data.models import Asset, UnderlyingObservation
 from canonical_data.timeutil import epoch_to_ns
 
 SYMBOLS = {
+    Asset.BTC: ("BTCUSDT", "spot"),
+    Asset.ETH: ("ETHUSDT", "spot"),
+    Asset.SOL: ("SOLUSDT", "spot"),
+    Asset.XRP: ("XRPUSDT", "spot"),
     Asset.DOGE: ("DOGEUSDT", "spot"),
     Asset.BNB: ("BNBUSDT", "spot"),
     Asset.HYPE: ("HYPEUSDT", "usds_m_perpetual"),

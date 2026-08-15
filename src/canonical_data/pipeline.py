@@ -6,12 +6,12 @@ import hashlib
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.errors import PipelineError, ResourceLimitError
-from canonical_data.kacho import ingest_kacho_ticks, kacho_native_events
 from canonical_data.manifest import build_manifest, verify_manifest
 from canonical_data.models import (
     Asset,
@@ -54,7 +54,6 @@ class PartitionInputs:
     markets: tuple[Market, ...]
     pmxt_rows: tuple[dict[str, Any], ...] = ()
     pmxt_source_object: str = ""
-    kacho_rows: tuple[dict[str, Any], ...] = ()
     underlying: tuple[UnderlyingObservation, ...] = ()
     provenance: tuple[Provenance, ...] = ()
     temporary_raw_paths: tuple[Path, ...] = ()
@@ -76,7 +75,6 @@ class BuiltPartition:
 class PipelineLimits:
     max_markets: int = 300
     max_pmxt_rows: int = 3_000_000
-    max_kacho_rows: int = 100_000
     max_samples: int = 1_000_000
     max_underlying_rows: int = 1_000_000
     max_partition_bytes: int = 1_000_000_000
@@ -88,7 +86,6 @@ class PipelineLimits:
         return cls(
             max_markets=int(limits["max_markets_per_partition"]),
             max_pmxt_rows=int(limits["max_pmxt_rows_per_partition"]),
-            max_kacho_rows=int(limits["max_kacho_rows_per_partition"]),
             max_samples=int(limits["max_derived_samples_per_partition"]),
             max_underlying_rows=int(limits["max_underlying_rows_per_partition"]),
             max_partition_bytes=int(limits["max_transformed_partition_bytes"]),
@@ -111,13 +108,21 @@ class Pipeline:
         self.tool_commit = tool_commit
         self.limits = limits or PipelineLimits()
 
-    def build(self, inputs: PartitionInputs, release_cutoff_ns: int) -> BuiltPartition:
+    def build(
+        self,
+        inputs: PartitionInputs,
+        release_cutoff_ns: int,
+        coverage_start_ns: int | None = None,
+    ) -> BuiltPartition:
         self._enforce_input_limits(inputs)
-        partition_id = f"{inputs.asset.value}/5m/{inputs.day}"
+        partition_id = f"{inputs.asset.value}/15m/{inputs.day}"
         identity_digest = self._identity_digest(inputs)
         existing = self.state_store.load(partition_id)
         directory = (
-            self.output_root / f"asset={inputs.asset.value}" / "timeframe=5m" / f"date={inputs.day}"
+            self.output_root
+            / f"asset={inputs.asset.value}"
+            / "timeframe=15m"
+            / f"date={inputs.day}"
         )
         if existing is not None and existing.phase in {Phase.VERIFIED, Phase.PUBLISHED}:
             if existing.identity_digest != identity_digest:
@@ -162,50 +167,34 @@ class Pipeline:
         for market in ordered_markets:
             if market.asset is not inputs.asset:
                 raise PipelineError("market asset does not match partition")
-            market_events = spool.load(market.condition_id) if spool else [
-                event for event in pmxt_events if event.condition_id == market.condition_id
-            ]
-            kacho = [
-                row
-                for row in inputs.kacho_rows
-                if str(row.get("condition_id")) == market.condition_id
-            ]
+            market_events = (
+                spool.load(market.condition_id)
+                if spool
+                else [event for event in pmxt_events if event.condition_id == market.condition_id]
+            )
             has_pmxt = bool(market_events)
-            has_kacho = bool(kacho)
             states = []
             gaps: list[tuple[int, int]] = []
             try:
                 if has_pmxt:
                     states = BookReconstructor().reconstruct(market_events)
                     native_samples, gaps = resample_200ms(market, states)
-                    if gaps and has_kacho:
-                        states = ingest_kacho_ticks(market, kacho)
-                        native_samples, gaps = resample_200ms(market, states)
-                        has_pmxt = False
-                elif has_kacho:
-                    states = ingest_kacho_ticks(market, kacho)
-                    native_samples, gaps = resample_200ms(market, states)
                 else:
                     native_samples, gaps = [], [(market.market_start_ns, market.market_end_ns)]
-            except PipelineError:
-                has_pmxt = False
-                if kacho:
-                    try:
-                        states = ingest_kacho_ticks(market, kacho)
-                        native_samples, gaps = resample_200ms(market, states)
-                    except PipelineError as fallback_error:
-                        exclusions.append(
-                            Exclusion(
-                                market.market_id,
-                                ExclusionReason.EVENT_CONFLICT,
-                                f"invalid Kacho market evidence: {fallback_error}",
-                            )
-                        )
-                        continue
-                else:
-                    states = []
-                    native_samples, gaps = [], [(market.market_start_ns, market.market_end_ns)]
-            tier, exclusion = classify(market, has_pmxt, has_kacho and bool(states), gaps)
+            except PipelineError as reconstruction_error:
+                exclusions.append(
+                    Exclusion(
+                        market.market_id,
+                        ExclusionReason.EVENT_CONFLICT,
+                        f"invalid PMXT market evidence: {reconstruction_error}",
+                        {
+                            "condition_id": market.condition_id,
+                            "market_evidence_sha256": market.evidence_sha256,
+                        },
+                    )
+                )
+                continue
+            tier, exclusion = classify(market, has_pmxt, gaps)
             if exclusion is not None:
                 exclusions.append(exclusion)
                 continue
@@ -213,6 +202,7 @@ class Pipeline:
             partition_tiers.append(tier)
             sample_count += len(native_samples)
             if sample_count > self.limits.max_samples:
+                self._abort_spooled_build(spool, event_writer, sample_writer)
                 raise ResourceLimitError("derived samples exceed partition cap")
             if native_samples:
                 sample_min = (
@@ -225,12 +215,10 @@ class Pipeline:
                     if sample_max is None
                     else max(sample_max, native_samples[-1].grid_ts_ns)
                 )
-            if tier is QualityTier.TIER_A:
-                native_events = market_events
-            else:
-                native_events = kacho_native_events(states)
+            native_events = market_events
             event_count += len(native_events)
             if event_count > self.limits.max_pmxt_rows:
+                self._abort_spooled_build(spool, event_writer, sample_writer)
                 raise ResourceLimitError("native events exceed partition cap")
             if event_writer is not None and sample_writer is not None:
                 event_writer.append([event_row(item) for item in native_events])
@@ -240,7 +228,11 @@ class Pipeline:
                 samples.extend(native_samples)
         tier = self._partition_tier(partition_tiers)
         if tier is QualityTier.EXCLUDED and not exclusions:
+            self._abort_spooled_build(spool, event_writer, sample_writer)
             raise PipelineError("excluded partition lacks explicit exclusion evidence")
+        if any(not exclusion.evidence for exclusion in exclusions):
+            self._abort_spooled_build(spool, event_writer, sample_writer)
+            raise PipelineError("exclusion lacks bound evidence")
         if spool is None:
             counts = write_partition_tables(
                 directory, accepted_markets, events, samples, inputs.underlying, exclusions
@@ -318,6 +310,11 @@ class Pipeline:
             exclusions,
             self.tool_commit,
             statistics,
+            coverage_start_ns
+            if coverage_start_ns is not None
+            else int(
+                datetime.fromisoformat(inputs.day).replace(tzinfo=UTC).timestamp() * 1_000_000_000
+            ),
             release_cutoff_ns,
         )
         verify_manifest(directory)
@@ -352,12 +349,25 @@ class Pipeline:
     def _partition_tier(tiers: list[QualityTier]) -> QualityTier:
         if not tiers:
             return QualityTier.EXCLUDED
-        return QualityTier.TIER_B if QualityTier.TIER_B in tiers else QualityTier.TIER_A
+        return QualityTier.TIER_A
+
+    @staticmethod
+    def _abort_spooled_build(
+        spool: EventSpool | None,
+        event_writer: StreamingTableWriter | None,
+        sample_writer: StreamingTableWriter | None,
+    ) -> None:
+        if event_writer is not None:
+            event_writer.abort()
+        if sample_writer is not None:
+            sample_writer.abort()
+        if spool is not None:
+            spool.close()
 
     @staticmethod
     def _identity_digest(inputs: PartitionInputs) -> str:
         identity = {
-            "partition": f"{inputs.asset.value}/5m/{inputs.day}",
+            "partition": f"{inputs.asset.value}/15m/{inputs.day}",
             "markets": [(market.condition_id, market.evidence_sha256) for market in inputs.markets],
             "provenance": [
                 (item.source_id, item.sha256, item.byte_length) for item in inputs.provenance
@@ -377,18 +387,23 @@ class Pipeline:
             (len(inputs.markets), limits.max_markets, "markets"),
             (len(inputs.pmxt_rows), limits.max_pmxt_rows, "PMXT rows"),
             (len(inputs.decoded_pmxt_events), limits.max_pmxt_rows, "decoded PMXT events"),
-            (len(inputs.kacho_rows), limits.max_kacho_rows, "Kacho rows"),
             (len(inputs.underlying), limits.max_underlying_rows, "underlying rows"),
         )
         for actual, maximum, name in checks:
             if actual > maximum:
                 raise ResourceLimitError(f"{name} exceed partition cap")
-        if self._available_memory_bytes() < limits.minimum_available_memory_bytes:
+        if (
+            limits.minimum_available_memory_bytes
+            and self._available_memory_bytes() < limits.minimum_available_memory_bytes
+        ):
             raise ResourceLimitError("available memory is below configured headroom")
 
     @staticmethod
     def _available_memory_bytes() -> int:
-        for line in Path("/proc/meminfo").read_text().splitlines():
+        memory_info = Path("/proc/meminfo")
+        if not memory_info.exists():
+            raise ResourceLimitError("cannot determine available memory")
+        for line in memory_info.read_text().splitlines():
             if line.startswith("MemAvailable:"):
                 return int(line.split()[1]) * 1024
         raise ResourceLimitError("cannot determine available memory")

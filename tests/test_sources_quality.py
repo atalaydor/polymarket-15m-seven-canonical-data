@@ -11,33 +11,28 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest import mock
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 from helpers import CONDITION, START_NS, gamma_payload, market
 
 from canonical_data.acquire import BoundedAcquirer, copy_bounded
-from canonical_data.binance import ingest_binance_zip
+from canonical_data.binance import SYMBOLS, ingest_binance_zip
 from canonical_data.discovery import GammaClient
 from canonical_data.errors import ResourceLimitError, SourceError
 from canonical_data.inventory import (
     SourceObject,
     binance_daily_objects,
-    expected_5m_market_starts,
+    expected_15m_market_starts,
     pmxt_hourly_objects,
 )
-from canonical_data.kacho import ingest_kacho_ticks, kacho_native_events, read_kacho_parquet
 from canonical_data.models import (
     Asset,
     BookEvent,
     EventType,
     ExclusionReason,
-    Outcome,
     QualityTier,
 )
 from canonical_data.planner import build_backfill_plan
-from canonical_data.quality import RELEASE_START, classify
+from canonical_data.quality import classify
 from canonical_data.rangeio import BoundedRangeReader
-from canonical_data.resample import resample_200ms
 from canonical_data.sources import ProductionSourceLoader
 from scripts.run_backfill import enforce_shared_pmxt_asset_caps
 
@@ -73,20 +68,25 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                     (*accepted, event(doge.condition_id, 4)), inventories
                 )
 
-    def test_pmxt_era_inventory_does_not_depend_on_degraded_kacho_metadata(self) -> None:
-        cutoff = datetime(2026, 8, 7, 15, tzinfo=UTC)
-        self.assertEqual(len(expected_5m_market_starts(date(2026, 4, 15), cutoff)), 288)
-        self.assertEqual(len(expected_5m_market_starts(date(2026, 8, 7), cutoff)), 180)
+    def test_15m_inventory_is_exact_at_full_and_partial_days(self) -> None:
+        coverage_start = datetime(2026, 4, 13, 19, tzinfo=UTC)
+        cutoff = datetime(2026, 8, 15, tzinfo=UTC)
+        self.assertEqual(
+            len(expected_15m_market_starts(date(2026, 4, 13), coverage_start, cutoff)), 20
+        )
+        self.assertEqual(
+            len(expected_15m_market_starts(date(2026, 4, 15), coverage_start, cutoff)), 96
+        )
 
-    def test_finite_backfill_plan_is_ordered_and_month_grouped(self) -> None:
-        plan = build_backfill_plan(date(2026, 4, 5), date(2026, 8, 7))
-        self.assertEqual(len(plan), 375)
-        self.assertEqual(plan[0]["partition_id"], "DOGE/5m/2026-04-05")
-        self.assertEqual(plan[-1]["partition_id"], "HYPE/5m/2026-08-07")
+    def test_finite_backfill_plan_is_ordered_and_bounded_by_half_month(self) -> None:
+        plan = build_backfill_plan(date(2026, 4, 13), date(2026, 8, 14))
+        self.assertEqual(len(plan), 868)
+        self.assertEqual(plan[0]["partition_id"], "BTC/15m/2026-04-13")
+        self.assertEqual(plan[-1]["partition_id"], "HYPE/15m/2026-08-14")
         groups = {row["release_group"] for row in plan}
-        self.assertEqual(len(groups), 5)
+        self.assertEqual(len(groups), 9)
         self.assertLessEqual(
-            max(sum(row["release_group"] == group for row in plan) for group in groups), 93
+            max(sum(row["release_group"] == group for row in plan) for group in groups), 112
         )
 
     def test_official_discovery_cache_pins_mutable_gamma_payload_for_restart(self) -> None:
@@ -111,9 +111,9 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
             self.assertEqual(first.provenance[0].sha256, second.provenance[0].sha256)
 
     def test_official_missing_slot_is_evidence_backed_source_gap(self) -> None:
-        result = ProductionSourceLoader(
-            GammaClient(lambda _url, _limit: b"[]"), 7
-        ).discover(Asset.DOGE, [START_NS // 1_000_000_000], allow_missing=True)
+        result = ProductionSourceLoader(GammaClient(lambda _url, _limit: b"[]"), 7).discover(
+            Asset.DOGE, [START_NS // 1_000_000_000], allow_missing=True
+        )
         self.assertEqual(result.markets, ())
         self.assertEqual(result.exclusions[0].reason_code, ExclusionReason.SOURCE_GAP)
         self.assertEqual(len(result.provenance), 1)
@@ -179,72 +179,15 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
             copy_bounded(io.BytesIO(b"12345"), io.BytesIO(), 4)
 
 
-class KachoTests(unittest.TestCase):
-    def test_bounded_parquet_filter(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "kacho.parquet"
-            table = pa.Table.from_pylist(
-                [
-                    {"condition_id": CONDITION, "t": START_NS // 1_000_000_000},
-                    {"condition_id": CONDITION, "t": START_NS // 1_000_000_000 + 600},
-                    {"condition_id": "other", "t": START_NS // 1_000_000_000},
-                ]
-            )
-            pq.write_table(table, path)
-            rows = read_kacho_parquet(
-                path,
-                {CONDITION},
-                max_rows=1,
-                start_s=START_NS // 1_000_000_000,
-                end_s=START_NS // 1_000_000_000 + 300,
-            )
-            self.assertEqual([row["condition_id"] for row in rows], [CONDITION])
-
-    def test_tier_b_semantics_and_inferred_outcome_ignored(self) -> None:
-        row = {
-            "condition_id": CONDITION,
-            "t": START_NS // 1_000_000_000,
-            "bu": "0.4",
-            "au": "0.6",
-            "su": "10",
-            "sau": "11",
-            "bd": "0.3",
-            "ad": "0.7",
-            "sd": "8",
-            "sad": "9",
-            "outcome": "Down",
-        }
-        states = ingest_kacho_ticks(market(), [row])
-        self.assertTrue(all(item.quality_tier is QualityTier.TIER_B for item in states))
-        self.assertTrue(all(item.native_interval_ms == 1000 for item in states))
-        self.assertTrue(all(item.receive_ts_ns is None for item in states))
-        native = kacho_native_events(states)
-        self.assertTrue(all(item.source_id == "kacho_5m" for item in native))
-        self.assertTrue(all(item.receive_ts_ns is None for item in native))
-        samples, _ = resample_200ms(market(), states)
-        self.assertTrue(all(item.quality_tier is QualityTier.TIER_B for item in samples))
-        self.assertTrue(all(item.asof_receive_ts_ns is None for item in samples))
-        self.assertEqual(market().official_outcome, Outcome.UP)
-
-    def test_duplicate_or_crossed_tick_rejected(self) -> None:
-        row = {
-            "condition_id": CONDITION,
-            "t": START_NS // 1_000_000_000,
-            "bu": "0.7",
-            "au": "0.6",
-            "su": "1",
-            "sau": "1",
-        }
-        with self.assertRaises(SourceError):
-            ingest_kacho_ticks(market(), [row])
-
-
 class BinanceTests(unittest.TestCase):
     def _zip(self, root: Path, name: str, content: str) -> tuple[Path, str]:
         path = root / f"{name}.zip"
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr(name, content)
         return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_non_settlement_profiles_cover_all_seven_assets(self) -> None:
+        self.assertEqual(set(SYMBOLS), set(Asset))
 
     def test_spot_and_hype_perpetual_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -275,12 +218,13 @@ class BinanceTests(unittest.TestCase):
 
 class QualityTests(unittest.TestCase):
     def test_tiers_and_exclusions_are_fail_closed(self) -> None:
-        tier, exclusion = classify(market(), True, False, [])
+        tier, exclusion = classify(market(), True, [])
         self.assertEqual((tier, exclusion), (QualityTier.TIER_A, None))
-        old = replace(market(), market_start_ns=RELEASE_START - 1)
-        tier, exclusion = classify(old, False, False, [])
+        unsupported = replace(market(), timeframe="5m")
+        tier, exclusion = classify(unsupported, False, [])
         self.assertEqual(tier, QualityTier.EXCLUDED)
         assert exclusion is not None
-        self.assertEqual(exclusion.reason_code, ExclusionReason.OUT_OF_SCOPE_DATE)
-        tier, exclusion = classify(market(), True, False, [(START_NS, START_NS + 1)])
+        self.assertEqual(exclusion.reason_code, ExclusionReason.UNSUPPORTED_TIMEFRAME)
+        self.assertTrue(exclusion.evidence)
+        tier, exclusion = classify(market(), True, [(START_NS, START_NS + 1)])
         self.assertEqual(tier, QualityTier.EXCLUDED)

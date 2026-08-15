@@ -1,43 +1,36 @@
 from __future__ import annotations
 
-import hashlib
 import io
-import json
 import subprocess
+import tempfile
 import unittest
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from email.message import Message
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
+
+from helpers import START_S, market
 
 from canonical_data.errors import ResourceLimitError, SourceError
 from canonical_data.inventory import SourceObject
-from canonical_data.models import Asset, Exclusion, ExclusionReason, Provenance
+from canonical_data.models import Asset
 from scripts.actions_backend import (
-    KACHO_REVISION,
-    KACHO_TICKS,
+    Authority,
     RemoteAsset,
+    _candidate_starts,
     _raise_child_failure,
     _request,
-    acquire_kacho,
+    day_plan,
+    find_canary_start,
     inventory_anomalies,
-    kacho_required,
-    matrix_stages,
-    select_proof_partition,
+    load_authority,
     unfinished_plan,
     verified_partitions,
 )
-from scripts.run_backfill import (
-    MAX_SOURCE_OBJECT_BYTES,
-    PMXT_HTTP_404_GAPS,
-    _acquire_with_retry,
-    _fetch_gamma,
-    prepare_shared_day,
-    run_partition,
-)
+from scripts.run_backfill import _acquire_with_retry, _market_starts
 
 
 class FakeResponse:
@@ -48,7 +41,6 @@ class FakeResponse:
         self.headers = Message()
         self.headers["Content-Type"] = "application/octet-stream"
         self.headers["Content-Length"] = str(len(payload))
-        self.headers["ETag"] = '"object-etag"'
 
     def __enter__(self) -> FakeResponse:
         return self
@@ -63,11 +55,49 @@ class FakeResponse:
         self.offset += len(chunk)
         return chunk
 
-    def geturl(self) -> str:
-        return "https://cdn-lfs.example.test/object?credential=secret"
-
 
 class ActionsBackendTests(unittest.TestCase):
+    @staticmethod
+    def authority(start: date = date(2026, 4, 5), end: date = date(2026, 4, 6)) -> Authority:
+        return Authority(
+            datetime(start.year, start.month, start.day, tzinfo=UTC),
+            datetime(end.year, end.month, end.day, tzinfo=UTC) + timedelta(days=1),
+            tuple(Asset),
+            datetime.fromtimestamp(START_S, UTC),
+            datetime.fromtimestamp(START_S, UTC),
+            15,
+        )
+
+    @staticmethod
+    def assets(partition: str) -> list[RemoteAsset]:
+        asset, _, day = partition.split("/")
+        return [
+            RemoteAsset(
+                f"{asset}--15m--{day}--{'a' * 64}--{filename}",
+                1,
+                "https://example.test/asset",
+                "a" * 64,
+                filename,
+            )
+            for filename in (
+                "book-200ms.parquet",
+                "book-events.parquet",
+                "exclusions.parquet",
+                "manifest.json",
+                "markets.parquet",
+                "underlying.parquet",
+            )
+        ]
+
+    def test_repository_authority_is_exact_15m_x7_and_finite(self) -> None:
+        authority = load_authority()
+        self.assertEqual(authority.assets, tuple(Asset))
+        self.assertEqual(
+            [asset.value for asset in authority.assets],
+            ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
+        )
+        self.assertEqual(len(_candidate_starts(authority)), 48)
+
     def test_github_request_retries_tls_transport_failure(self) -> None:
         tls_failure = urllib.error.URLError("certificate verify failed")
         with (
@@ -96,27 +126,6 @@ class ActionsBackendTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "child-out\n")
         self.assertEqual(stderr.getvalue(), "child-error\n")
 
-    def test_gamma_retries_transient_status_and_preserves_payload_bound(self) -> None:
-        throttled = urllib.error.HTTPError(
-            "https://example.test/gamma", 429, "Too Many Requests", Message(), None
-        )
-        with (
-            patch(
-                "scripts.run_backfill.urllib.request.urlopen",
-                side_effect=(throttled, FakeResponse(b"[]")),
-            ) as urlopen,
-            patch("scripts.run_backfill.time.sleep") as sleep,
-        ):
-            self.assertEqual(_fetch_gamma("https://example.test/gamma", 2), b"[]")
-            self.assertEqual(urlopen.call_count, 2)
-            sleep.assert_called_once_with(2)
-        with patch(
-            "scripts.run_backfill.urllib.request.urlopen",
-            return_value=FakeResponse(b"oversized"),
-        ):
-            with self.assertRaisesRegex(SourceError, "configured bound"):
-                _fetch_gamma("https://example.test/gamma", 2)
-
     def test_acquisition_does_not_retry_limits_or_unexplained_404(self) -> None:
         source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
         missing = urllib.error.HTTPError(source.url, 404, "Not Found", Message(), None)
@@ -126,260 +135,85 @@ class ActionsBackendTests(unittest.TestCase):
                     "scripts.run_backfill.BoundedAcquirer.acquire", side_effect=failure
                 ) as acquire,
                 patch("scripts.run_backfill.time.sleep") as sleep,
-                TemporaryDirectory() as temporary,
+                tempfile.TemporaryDirectory() as temporary,
             ):
                 with self.assertRaises(type(failure)):
                     _acquire_with_retry(source, Path(temporary))
             acquire.assert_called_once()
             sleep.assert_not_called()
 
-    def test_recovery_source_bound_and_exact_declared_gaps_are_finite(self) -> None:
-        self.assertEqual(MAX_SOURCE_OBJECT_BYTES, 800_000_000)
-        self.assertGreater(MAX_SOURCE_OBJECT_BYTES, 764_905_077)
+    def test_explicit_market_starts_must_be_one_day_and_15m_aligned(self) -> None:
+        day = datetime.fromtimestamp(START_S, UTC).date()
+        cutoff = datetime.fromtimestamp(START_S + 900, UTC)
+        coverage_start = datetime.fromtimestamp(START_S, UTC)
+        self.assertEqual(_market_starts(day, coverage_start, cutoff, (START_S,)), [START_S])
+        with self.assertRaisesRegex(SourceError, "aligned"):
+            _market_starts(day, coverage_start, cutoff, (START_S + 1,))
+
+    def test_remote_durable_partitions_are_zero_times_and_unfinished_once(self) -> None:
+        authority = self.authority()
+        durable = "BTC/15m/2026-04-05"
+        inventory = {durable: self.assets(durable)}
+        plan = unfinished_plan(inventory, authority)
+        ids = [str(item["partition_id"]) for item in plan]
+        self.assertNotIn(durable, ids)
+        self.assertEqual(len(ids), 13)
+        self.assertEqual(len(ids), len(set(ids)))
+        days = day_plan(plan)
+        self.assertEqual(days, [{"day": "2026-04-05"}, {"day": "2026-04-06"}])
+
+    def test_partial_resumes_while_unsafe_remote_state_fails_closed(self) -> None:
+        authority = self.authority()
+        partition = "BTC/15m/2026-04-05"
+        assets = self.assets(partition)
+        self.assertEqual(verified_partitions({partition: assets}), {partition})
+        partial_inventory = {partition: assets[:-1]}
+        self.assertEqual(inventory_anomalies(partial_inventory, authority)["partial"], [partition])
+        self.assertIn(
+            partition,
+            {str(item["partition_id"]) for item in unfinished_plan(partial_inventory, authority)},
+        )
+        divergent = [*assets, replace(assets[0], digest="b" * 64)]
+        self.assertTrue(inventory_anomalies({partition: divergent}, authority)["divergent"])
+        duplicate = [*assets, assets[0]]
+        self.assertTrue(inventory_anomalies({partition: duplicate}, authority)["duplicate"])
+        outside = "BTC/15m/2026-04-07"
         self.assertEqual(
-            sorted(PMXT_HTTP_404_GAPS),
-            [
-                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-06-11T04.parquet",
-                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-06-11T05.parquet",
-                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-06-11T06.parquet",
-            ],
+            inventory_anomalies({outside: self.assets(outside)}, authority)["out_of_plan"],
+            [outside],
         )
 
-    def test_all_missing_official_inventory_skips_pmxt_acquisition(self) -> None:
-        class MissingLoader:
+    def test_common_canary_candidate_requires_exact_market_for_all_assets(self) -> None:
+        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
+
+        class FakeGamma:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
 
-            def discover(self, *args: object, **kwargs: object) -> object:
-                from types import SimpleNamespace
-
-                return SimpleNamespace(markets=(), provenance=(), exclusions=(object(),))
-
-        with TemporaryDirectory() as temporary:
-            with (
-                patch("scripts.run_backfill.ProductionSourceLoader", MissingLoader),
-                patch("scripts.run_backfill.pmxt_hourly_objects") as inventory,
-            ):
-                spool, provenance, source_bytes = prepare_shared_day(
-                    date(2026, 6, 1),
-                    Path(temporary) / "kacho",
-                    Path(temporary) / "work",
-                    (Asset.HYPE,),
+            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
+                fixture = replace(
+                    market(asset),
+                    market_start_ns=start * 1_000_000_000,
+                    market_end_ns=(start + 900) * 1_000_000_000,
                 )
-            inventory.assert_not_called()
-            self.assertTrue(spool.exists())
-            self.assertEqual(provenance, {Asset.HYPE: ()})
-            self.assertEqual(source_bytes, 0)
+                return fixture, b"payload", "https://example.test/gamma"
 
-    def test_all_missing_partition_skips_binance_and_writes_excluded_ledger(self) -> None:
-        official = Provenance(
-            "polymarket_gamma_clob",
-            "https://gamma-api.polymarket.com/events?slug=missing",
-            1,
-            2,
-            "a" * 64,
-            "ungranted_for_bulk_redistribution",
-            "official_api",
+        with patch("scripts.actions_backend.GammaClient", FakeGamma):
+            start, markets, attempts = find_canary_start(authority)
+        self.assertEqual(start, START_S)
+        self.assertEqual(set(markets), set(Asset))
+        self.assertEqual(attempts, 7)
+
+    def test_canary_candidate_search_is_bounded(self) -> None:
+        authority = replace(
+            self.authority(),
+            canary_search_start=datetime(2026, 4, 6, tzinfo=UTC),
+            canary_search_end=datetime(2026, 4, 4, tzinfo=UTC),
+            canary_step_minutes=15,
         )
-        exclusion = Exclusion(
-            "hype-updown-5m-missing",
-            ExclusionReason.SOURCE_GAP,
-            "official Gamma slug returned no market",
-            {"payload_sha256": "b" * 64},
-        )
+        with self.assertRaisesRegex(RuntimeError, "finite cap"):
+            _candidate_starts(authority)
 
-        class MissingLoader:
-            def __init__(self, *args: object, **kwargs: object) -> None:
-                pass
 
-            def discover(self, *args: object, **kwargs: object) -> object:
-                from types import SimpleNamespace
-
-                return SimpleNamespace(
-                    markets=(), provenance=(official,), exclusions=(exclusion,)
-                )
-
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            ledger = root / "ledger.json"
-            with (
-                patch("scripts.run_backfill.ProductionSourceLoader", MissingLoader),
-                patch("scripts.run_backfill._fetch_text") as fetch_binance,
-                patch("scripts.run_backfill._tool_commit", return_value="d" * 40),
-                patch("scripts.run_backfill.GitHubReleaseBackend"),
-                patch("scripts.run_backfill.Pipeline.publish", return_value=[object()] * 6),
-            ):
-                result = run_partition(
-                    Asset.HYPE,
-                    date(2026, 6, 1),
-                    root / "kacho",
-                    root / "work",
-                    ledger,
-                )
-            fetch_binance.assert_not_called()
-            self.assertEqual(result["quality"], "EXCLUDED")
-            self.assertEqual(result["source_bytes"], 0)
-            self.assertEqual(result["remote_assets"], 6)
-            stored = json.loads(ledger.read_bytes())
-            self.assertEqual(stored["partitions"]["HYPE/5m/2026-06-01"], result)
-
-    def test_kacho_transfer_is_limited_to_the_frozen_fallback_window(self) -> None:
-        self.assertTrue(kacho_required("2026-05-18"))
-        self.assertFalse(kacho_required("2026-05-19"))
-        self.assertFalse(kacho_required("2026-08-07"))
-
-    def test_kacho_retries_transient_throttle_without_retaining_partial_bytes(self) -> None:
-        payload = b"pinned-parquet-object"
-        digest = hashlib.sha256(payload).hexdigest()
-        throttled = urllib.error.HTTPError(
-            "https://example.test/object", 429, "Too Many Requests", Message(), None
-        )
-        with TemporaryDirectory() as temporary:
-            with (
-                patch.dict(
-                    KACHO_TICKS,
-                    {"DOGE": ("doge_ticks.parquet", f"{digest}.source", digest, len(payload))},
-                ),
-                patch(
-                    "scripts.actions_backend.urllib.request.urlopen",
-                    side_effect=(throttled, FakeResponse(payload)),
-                ) as urlopen,
-                patch("scripts.actions_backend.time.sleep") as sleep,
-            ):
-                self.assertEqual(acquire_kacho("DOGE", Path(temporary)), len(payload))
-                self.assertEqual(urlopen.call_count, 2)
-                sleep.assert_called_once_with(2)
-                self.assertEqual(
-                    (Path(temporary) / f"{digest}.source").read_bytes(), payload
-                )
-
-    def test_kacho_accepts_only_pinned_object_at_immutable_revision(self) -> None:
-        payload = b"pinned-parquet-object"
-        digest = hashlib.sha256(payload).hexdigest()
-        response = FakeResponse(payload)
-        with TemporaryDirectory() as temporary:
-            with (
-                patch.dict(
-                    KACHO_TICKS,
-                    {"DOGE": ("doge_ticks.parquet", f"{digest}.source", digest, len(payload))},
-                ),
-                patch(
-                    "scripts.actions_backend.urllib.request.urlopen", return_value=response
-                ) as urlopen,
-            ):
-                self.assertEqual(acquire_kacho("DOGE", Path(temporary)), len(payload))
-                requested = str(urlopen.call_args.args[0].full_url)
-                self.assertIn(f"/resolve/{KACHO_REVISION}/doge_ticks.parquet", requested)
-                self.assertEqual((Path(temporary) / f"{digest}.source").read_bytes(), payload)
-
-    def test_kacho_rejects_wrong_object_with_bounded_safe_diagnostics(self) -> None:
-        with TemporaryDirectory() as temporary:
-            with patch(
-                "scripts.actions_backend.urllib.request.urlopen",
-                return_value=FakeResponse(b"not-the-pinned-parquet"),
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    r'"actual_bytes": 22.*"actual_sha256":.*'
-                    r'"response_host": "cdn-lfs.example.test"',
-                ) as raised:
-                    acquire_kacho("DOGE", Path(temporary))
-        self.assertNotIn("credential", str(raised.exception))
-        self.assertNotIn("not-the-pinned-parquet", str(raised.exception))
-
-    @staticmethod
-    def _assets(partition: str) -> list[RemoteAsset]:
-        asset, _, day = partition.split("/")
-        return [
-            RemoteAsset(
-                f"{asset}--5m--{day}--{'a' * 64}--{filename}",
-                1,
-                "https://example.test/asset",
-                "a" * 64,
-                filename,
-            )
-            for filename in (
-                "book-200ms.parquet",
-                "book-events.parquet",
-                "exclusions.parquet",
-                "manifest.json",
-                "markets.parquet",
-                "underlying.parquet",
-            )
-        ]
-
-    def test_complete_remote_partition_is_omitted_and_partial_fails_closed(self) -> None:
-        partition = "DOGE/5m/2026-04-05"
-        assets = [
-            RemoteAsset(
-                f"DOGE--5m--2026-04-05--{'a' * 64}--{filename}",
-                1,
-                "https://example.test/asset",
-                "a" * 64,
-                filename,
-            )
-            for filename in (
-                "book-200ms.parquet",
-                "book-events.parquet",
-                "exclusions.parquet",
-                "manifest.json",
-                "markets.parquet",
-                "underlying.parquet",
-            )
-        ]
-        inventory = {partition: assets}
-        self.assertEqual(verified_partitions(inventory), {partition})
-        self.assertNotIn(partition, {item["partition_id"] for item in unfinished_plan(inventory)})
-        self.assertEqual(verified_partitions({partition: assets[:-1]}), set())
-        starter = [*assets]
-        starter[0] = RemoteAsset(
-            starter[0].name,
-            starter[0].size,
-            starter[0].url,
-            starter[0].digest,
-            starter[0].filename,
-            "starter",
-            "513096757",
-        )
-        starter_inventory = {partition: starter}
-        self.assertEqual(verified_partitions(starter_inventory), set())
-        self.assertEqual(inventory_anomalies(starter_inventory)["partial"], [partition])
-
-    def test_proof_partition_allows_out_of_order_recovery_with_remote_evidence(self) -> None:
-        partition = "HYPE/5m/2026-05-27"
-        other = "DOGE/5m/2026-04-05"
-        ledger = {"completed": 2, "last_partition": partition}
-        inventory = {
-            partition: self._assets(partition),
-            other: self._assets(other),
-        }
-        self.assertEqual(select_proof_partition(ledger, inventory), partition)
-
-    def test_proof_partition_rejects_inconsistent_or_unsupported_ledger_claim(self) -> None:
-        partition = "HYPE/5m/2026-04-05"
-        with self.assertRaisesRegex(RuntimeError, "count does not match"):
-            select_proof_partition(
-                {"completed": 3, "last_partition": "DOGE/5m/2026-04-05"},
-                {partition: self._assets(partition)},
-            )
-        with self.assertRaisesRegex(RuntimeError, "lacks durable remote evidence"):
-            inventory = {
-                item: self._assets(item)
-                for item in (
-                    "DOGE/5m/2026-04-05",
-                    "BNB/5m/2026-04-05",
-                    "DOGE/5m/2026-04-06",
-                )
-            }
-            select_proof_partition(
-                {"completed": 3, "last_partition": partition}, inventory
-            )
-
-    def test_matrices_are_finite_unique_and_bounded(self) -> None:
-        plan = unfinished_plan({})
-        stages = matrix_stages(plan)
-        flattened = [item["day"] for stage in stages for item in stage["include"]]
-        self.assertEqual(len(flattened), 125)
-        self.assertEqual(len(set(flattened)), 125)
-        self.assertTrue(all(len(stage["include"]) <= 256 for stage in stages))
-        self.assertEqual([len(stage["include"]) for stage in stages], [125])
+if __name__ == "__main__":
+    unittest.main()

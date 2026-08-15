@@ -19,7 +19,7 @@ from canonical_data.errors import (
     ResourceLimitError,
     SourceError,
 )
-from canonical_data.models import EventType
+from canonical_data.models import Asset, EventType
 from canonical_data.pmxt import PMXT_COLUMNS, BookReconstructor, decode_rows, read_pmxt_parquet
 from canonical_data.resample import resample_200ms
 from canonical_data.sources import ProductionSourceLoader
@@ -38,7 +38,7 @@ class DiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(found.condition_id, CONDITION)
         self.assertEqual(payload, gamma_payload())
-        self.assertIn("slug=doge-updown-5m-1776106800", url)
+        self.assertIn("slug=doge-updown-15m-1776106800", url)
         self.assertEqual(seen, [(url, 12345)])
 
     def test_binds_identity_rules_tokens_and_official_outcome(self) -> None:
@@ -47,7 +47,16 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(found[0].condition_id, CONDITION)
         self.assertEqual((found[0].token_up, found[0].token_down), ("1", "2"))
         self.assertEqual(found[0].official_outcome.value, "UP")
-        self.assertEqual(found[0].market_end_ns - found[0].market_start_ns, 300_000_000_000)
+        self.assertEqual(found[0].market_end_ns - found[0].market_start_ns, 900_000_000_000)
+
+    def test_all_seven_asset_profiles_bind_exact_15m_semantics(self) -> None:
+        for asset in Asset:
+            with self.subTest(asset=asset.value):
+                found = discover([gamma_payload(asset)])[0]
+                self.assertIs(found.asset, asset)
+                self.assertEqual(found.timeframe, "15m")
+                self.assertEqual(found.market_start_ns % 900_000_000_000, 0)
+                self.assertEqual(found.market_end_ns - found.market_start_ns, 900_000_000_000)
 
     def test_rejects_wrong_rule_authority(self) -> None:
         raw = json.loads(gamma_payload())
@@ -302,7 +311,7 @@ class ResampleTests(unittest.TestCase):
         states = BookReconstructor().reconstruct(events)
         samples, gaps = resample_200ms(market(), states)
         self.assertEqual(gaps, [])
-        self.assertEqual(len(samples), 3000)
+        self.assertEqual(len(samples), 9000)
         at_start = next(
             item for item in samples if item.token_id == "1" and item.grid_ts_ns == START_NS
         )

@@ -1,36 +1,17 @@
-# DOGE / BNB / HYPE canonical historical data
+# Polymarket 15-minute seven-asset canonical data
 
-This public repository implements the zero-cost, resumable production pipeline for Polymarket DOGE,
-BNB, and HYPE **5-minute Up/Down** markets. Chapter 1 froze feasibility and architecture; Chapter 2
-implements the complete pipeline without building the historical dataset.
+This repository is the isolated control plane for a new canonical historical dataset of actual
+Polymarket 15-minute Up/Down markets for BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE. It does not
+convert or resample 5-minute markets.
 
-The target is a portable immutable public release that a Linux consumer can download and verify.
-It is a sanitized **interchange/import contract**, not a claim of compatibility with any private
-factory. Windows is gateway-only; processing occurs in a 2-core GitHub Codespace without Actions.
+Production is locked until one Actions canary establishes a resolved common 15-minute window,
+official settlement bindings, PMXT availability, shared-source behavior, isolated publication,
+authenticated no-op verification, and runner safety margins. The canary uses its own Release
+namespace and cannot create production authority.
 
-## Frozen scope
+After a passing receipt is committed, the finite planner derives unfinished asset/day partitions
+from content-addressed remote Releases. One UTC day is processed at a time, with one PMXT source
+pass shared by every unfinished asset and independent durable publication per partition.
 
-- Tier A: event-level PMXT v2 book reconstruction plus official Polymarket identity/rules/outcome,
-  from `2026-04-13T19:00:00Z`, for verified 5-minute DOGE/BNB/HYPE markets.
-- Tier B: Kacho 1 Hz top-of-book validation/backfill for `2026-04-05` through `2026-05-18`, with
-  inferred outcomes discarded; Binance venue observations are non-settlement validation only.
-- Excluded: 15-minute markets, pre-2026-04-05 history, unsupported fields, private/paid sources,
-  and any market whose identity, rules, timestamps, or official result cannot be verified.
-
-See [source authority](docs/source-authority.md), [contract](docs/dataset-contract.md), and
-[architecture](docs/storage-and-execution-architecture.md). Operational ownership is documented in
-[pipeline operations](docs/pipeline-operations.md). [Chapter 3 pilot calibration](docs/pilot-calibration.md), its
-[machine-readable measurements](docs/pilot-results.json), and the
-[production plan](config/production-plan.json) freeze the Chapter 4 execution parameters.
-
-Run:
-
-```bash
-python -m unittest discover -s tests -v
-python -m canonical_data.audit --offline
-ruff check .
-mypy
-```
-
-No combined dataset license is selected. Source obligations remain attached to each record and
-asset; see [licensing](docs/licensing.md).
+See [source authority](docs/source-authority.md), [dataset contract](docs/dataset-contract.md),
+[quality policy](docs/data-quality-policy.md), and [operations](docs/pipeline-operations.md).

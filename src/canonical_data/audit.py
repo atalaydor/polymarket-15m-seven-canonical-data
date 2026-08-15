@@ -12,8 +12,6 @@ from typing import Any
 
 from canonical_data.httpclient import USER_AGENT
 
-ROOT = Path(__file__).resolve().parents[2]
-
 
 def canonical_json_bytes(value: Any) -> bytes:
     """Serialize JSON deterministically for manifests and digests."""
@@ -30,26 +28,29 @@ def load_json(path: Path) -> Any:
         return json.load(handle)
 
 
-def offline_audit(root: Path = ROOT) -> dict[str, Any]:
+def offline_audit(root: Path | None = None) -> dict[str, Any]:
+    root = root or Path.cwd()
     sources = load_json(root / "config/sources.json")
     scope = load_json(root / "config/scope.json")
     pipeline = load_json(root / "config/pipeline.json")
     production = load_json(root / "config/production-plan.json")
+    neutral_evidence = load_json(root / "docs/timeframe-neutral-evidence.json")
     schema = load_json(root / "schemas/partition-manifest.schema.json")
     ids = [source["id"] for source in sources["sources"]]
     errors: list[str] = []
     if len(ids) != len(set(ids)):
         errors.append("duplicate source id")
-    if scope["timeframes"]["included"] != ["5m"]:
-        errors.append("only 5m may be included")
-    if set(scope["assets"]) != {"DOGE", "BNB", "HYPE"}:
+    if scope["timeframes"]["included"] != ["15m"]:
+        errors.append("only 15m may be included")
+    if scope["assets"] != ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]:
         errors.append("asset scope changed")
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         errors.append("manifest schema draft changed")
     if pipeline["execution"] != {
         "workers": 1,
         "sample_interval_ms": 200,
-        "partition": "asset/timeframe/utc_date",
+        "partition": "asset/15m/utc_date",
+        "shared_source_unit": "utc_day",
     }:
         errors.append("pipeline execution boundary changed")
     limits = pipeline["resource_limits"]
@@ -59,12 +60,34 @@ def offline_audit(root: Path = ROOT) -> dict[str, Any]:
         errors.append("disk headroom weakened")
     if limits["minimum_available_memory_bytes"] < 2_000_000_000:
         errors.append("memory headroom weakened")
-    if production["partition"]["count"] != 375:
-        errors.append("finite production partition count changed")
+    if production["dataset_id"] != "polymarket-15m-seven-v1":
+        errors.append("production dataset identity changed")
+    if (
+        production.get("coverage_start") != "2026-04-13T19:00:00Z"
+        or production.get("release_cutoff") != "2026-08-15T00:00:00Z"
+    ):
+        errors.append("production coverage boundary changed")
+    if neutral_evidence.get(
+        "evidence_class"
+    ) != "timeframe_neutral_raw_source_catalog_metadata" or neutral_evidence[
+        "extracted_pmxt_catalog"
+    ].get("start") != production.get("coverage_start"):
+        errors.append("PMXT coverage lacks timeframe-neutral evidence")
+    if production["partition"] != {
+        "unit": "asset/timeframe/utc_date",
+        "assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
+        "timeframe": "15m",
+    }:
+        errors.append("production partition authority changed")
     if production["execution"]["concurrency"] != 1:
         errors.append("production concurrency changed")
-    if production["publication"]["maximum_assets_including_index_notice"] > 1000:
-        errors.append("release asset-count bound exceeds GitHub limit")
+    if production["publication"]["release_prefix"] != "polymarket-15m-seven-v1":
+        errors.append("production namespace changed")
+    if (
+        production["publication"].get("grouping") != "half_month"
+        or production["publication"].get("maximum_assets_per_release") != 672
+    ):
+        errors.append("production release grouping is not bounded")
     return {
         "errors": errors,
         "source_count": len(ids),

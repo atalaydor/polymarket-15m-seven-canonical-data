@@ -56,38 +56,41 @@ def read_pmxt_parquet(
     if not condition_ids or not token_ids:
         return []
     parquet = pq.ParquetFile(source)
-    market_index = parquet.schema_arrow.get_field_index("market")
-    selected: list[int] = []
-    scanned = 0
-    encoded = {value.encode("ascii") for value in condition_ids}
-    for index in range(parquet.metadata.num_row_groups):
-        group = parquet.metadata.row_group(index)
-        stats = group.column(market_index).statistics
-        include = True
-        if stats is not None and stats.has_min_max:
-            minimum = stats.min if isinstance(stats.min, bytes) else str(stats.min).encode()
-            maximum = stats.max if isinstance(stats.max, bytes) else str(stats.max).encode()
-            include = any(minimum <= value <= maximum for value in encoded)
-        if include:
-            scanned += group.num_rows
-            if scanned > max_scanned_rows:
-                raise ResourceLimitError("PMXT selected row groups exceed scan-row cap")
-            selected.append(index)
-    if not selected:
-        return []
-    market_values = pa.array(sorted(encoded), type=pa.binary(66))
-    token_values = pa.array(sorted(token_ids))
-    events: list[BookEvent] = []
-    row_offset = 0
-    for index in selected:
-        table = parquet.read_row_group(index, columns=PMXT_COLUMNS)
-        table = table.filter(pc.is_in(table["market"], value_set=market_values))
-        table = table.filter(pc.is_in(table["asset_id"], value_set=token_values))
-        if len(events) + table.num_rows > max_output_rows:
-            raise ResourceLimitError("PMXT filtered output exceeds row cap")
-        events.extend(decode_rows(table.to_pylist(), source_object, row_offset))
-        row_offset += parquet.metadata.row_group(index).num_rows
-    return order_and_deduplicate(events)
+    try:
+        market_index = parquet.schema_arrow.get_field_index("market")
+        selected: list[int] = []
+        scanned = 0
+        encoded = {value.encode("ascii") for value in condition_ids}
+        for index in range(parquet.metadata.num_row_groups):
+            group = parquet.metadata.row_group(index)
+            stats = group.column(market_index).statistics
+            include = True
+            if stats is not None and stats.has_min_max:
+                minimum = stats.min if isinstance(stats.min, bytes) else str(stats.min).encode()
+                maximum = stats.max if isinstance(stats.max, bytes) else str(stats.max).encode()
+                include = any(minimum <= value <= maximum for value in encoded)
+            if include:
+                scanned += group.num_rows
+                if scanned > max_scanned_rows:
+                    raise ResourceLimitError("PMXT selected row groups exceed scan-row cap")
+                selected.append(index)
+        if not selected:
+            return []
+        market_values = pa.array(sorted(encoded), type=pa.binary(66))
+        token_values = pa.array(sorted(token_ids))
+        events: list[BookEvent] = []
+        row_offset = 0
+        for index in selected:
+            table = parquet.read_row_group(index, columns=PMXT_COLUMNS)
+            table = table.filter(pc.is_in(table["market"], value_set=market_values))
+            table = table.filter(pc.is_in(table["asset_id"], value_set=token_values))
+            if len(events) + table.num_rows > max_output_rows:
+                raise ResourceLimitError("PMXT filtered output exceeds row cap")
+            events.extend(decode_rows(table.to_pylist(), source_object, row_offset))
+            row_offset += parquet.metadata.row_group(index).num_rows
+        return order_and_deduplicate(events)
+    finally:
+        parquet.close()
 
 
 def _decimal(value: Any, name: str, nullable: bool = True) -> Decimal | None:

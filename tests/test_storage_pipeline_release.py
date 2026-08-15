@@ -4,7 +4,6 @@ import json
 import tempfile
 import unittest
 import urllib.error
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -57,6 +56,7 @@ class ParquetManifestTests(unittest.TestCase):
                 [],
                 COMMIT,
                 {"row_counts": counts},
+                market().market_start_ns,
                 market().market_end_ns,
             )
             index_digest = build_release_index(
@@ -109,6 +109,7 @@ class ParquetManifestTests(unittest.TestCase):
                     [],
                     COMMIT,
                     {"row_counts": counts},
+                    market().market_start_ns,
                     market().market_end_ns,
                 )
                 self.assertEqual(verify_manifest(directory), digest)
@@ -138,6 +139,7 @@ class ParquetManifestTests(unittest.TestCase):
                 [],
                 COMMIT,
                 {"row_counts": counts},
+                market().market_start_ns,
                 market().market_end_ns,
             )
             (directory / "markets.parquet").write_bytes(b"substituted")
@@ -155,7 +157,7 @@ class StateTests(unittest.TestCase):
     def test_resume_idempotency_and_conflict_refusal(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = StateStore(Path(temp))
-            first = Checkpoint("DOGE/5m/2026-04-13", Phase.INVENTORIED, "a")
+            first = Checkpoint("DOGE/15m/2026-04-13", Phase.INVENTORIED, "a")
             self.assertTrue(store.advance(first))
             self.assertFalse(store.advance(first))
             store.advance(Checkpoint(first.partition_id, Phase.VERIFIED, "a", "b"))
@@ -171,9 +173,7 @@ class PipelineTests(unittest.TestCase):
     def test_empty_partition_without_exclusion_evidence_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            with self.assertRaisesRegex(
-                PipelineError, "lacks explicit exclusion evidence"
-            ):
+            with self.assertRaisesRegex(PipelineError, "lacks explicit exclusion evidence"):
                 Pipeline(root / "out", StateStore(root / "state"), COMMIT).build(
                     PartitionInputs(
                         Asset.DOGE,
@@ -189,7 +189,10 @@ class PipelineTests(unittest.TestCase):
             root = Path(temp)
             item = market()
             exclusion = Exclusion(
-                item.market_id, ExclusionReason.SOURCE_GAP, "no usable event evidence"
+                item.market_id,
+                ExclusionReason.SOURCE_GAP,
+                "no usable event evidence",
+                {"payload_sha256": "a" * 64},
             )
             built = Pipeline(root / "out", StateStore(root / "state"), COMMIT).build(
                 PartitionInputs(
@@ -205,9 +208,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(built.tier, QualityTier.EXCLUDED)
             self.assertEqual(manifest["quality_tier"], "EXCLUDED")
             self.assertEqual(manifest["statistics"]["market_count"], 0)
-            self.assertEqual(
-                pq.read_metadata(built.directory / "exclusions.parquet").num_rows, 1
-            )
+            self.assertEqual(pq.read_metadata(built.directory / "exclusions.parquet").num_rows, 1)
 
     def test_disk_spool_pipeline_is_bounded_and_byte_deterministic(self) -> None:
         decoded = decode_rows(pmxt_rows(), "fixture")
@@ -234,7 +235,12 @@ class PipelineTests(unittest.TestCase):
                         event_spool_path=spool_path,
                         provenance=(provenance(),),
                         preexisting_exclusions=(
-                            Exclusion("missing-slug", ExclusionReason.SOURCE_GAP, "official gap"),
+                            Exclusion(
+                                "missing-slug",
+                                ExclusionReason.SOURCE_GAP,
+                                "official gap",
+                                {"payload_sha256": "a" * 64},
+                            ),
                         ),
                     ),
                     market().market_end_ns,
@@ -273,83 +279,26 @@ class PipelineTests(unittest.TestCase):
                     market().market_end_ns,
                 )
 
-    def test_invalid_kacho_market_is_evidence_backed_exclusion_not_partition_abort(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            good = market()
-            bad = replace(
-                good,
-                market_id="bad-market",
-                condition_id="0x" + "b" * 64,
-                token_up="3",
-                token_down="4",
-            )
-            base = {
-                "t": good.market_start_ns // 1_000_000_000,
-                "bu": "0.4",
-                "au": "0.6",
-                "su": "1",
-                "sau": "1",
-                "bd": "0.4",
-                "ad": "0.6",
-                "sd": "1",
-                "sad": "1",
-            }
-            rows = (
-                {**base, "condition_id": good.condition_id},
-                {**base, "condition_id": bad.condition_id, "bu": "0.7"},
-            )
-            built = Pipeline(root / "out", StateStore(root / "state"), COMMIT).build(
-                PartitionInputs(
-                    Asset.DOGE,
-                    "2026-04-13",
-                    (good, bad),
-                    kacho_rows=rows,
-                    provenance=(provenance("kacho_5m"),),
-                ),
-                good.market_end_ns,
-            )
-            exclusions = pq.ParquetFile(built.directory / "exclusions.parquet").read().to_pylist()
-            self.assertEqual(exclusions[0]["reason_code"], "EVENT_CONFLICT")
-
-    def test_pmxt_failure_can_only_degrade_to_explicit_kacho_tier_b(self) -> None:
+    def test_invalid_pmxt_is_evidence_backed_exclusion_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             pipeline = Pipeline(root / "out", StateStore(root / "state"), COMMIT)
             bad_pmxt = (pmxt_rows()[2],)  # increment without any snapshot
-            kacho = (
-                {
-                    "condition_id": market().condition_id,
-                    "t": market().market_start_ns // 1_000_000_000,
-                    "bu": "0.4",
-                    "au": "0.6",
-                    "su": "1",
-                    "sau": "1",
-                    "bd": "0.4",
-                    "ad": "0.6",
-                    "sd": "1",
-                    "sad": "1",
-                    "outcome": "Down",
-                },
-            )
             inputs = PartitionInputs(
                 Asset.DOGE,
                 "2026-04-13",
                 (market(),),
                 bad_pmxt,
                 "bad-fixture",
-                kacho,
-                provenance=(provenance("kacho_5m"),),
+                provenance=(provenance(),),
             )
             built = pipeline.build(inputs, market().market_end_ns)
-            self.assertEqual(built.tier, QualityTier.TIER_B)
-            events = pq.read_table(built.directory / "book-events.parquet").to_pylist()
-            self.assertEqual({item["source_id"] for item in events}, {"kacho_5m"})
-            self.assertTrue(all(item["receive_ts_ns"] is None for item in events))
-            markets = pq.ParquetFile(built.directory / "markets.parquet").read().to_pylist()
-            self.assertEqual(markets[0]["official_outcome"], "UP")
+            self.assertEqual(built.tier, QualityTier.EXCLUDED)
+            exclusions = pq.read_table(built.directory / "exclusions.parquet").to_pylist()
+            self.assertEqual(exclusions[0]["reason_code"], "EVENT_CONFLICT")
+            self.assertIn("condition_id", exclusions[0]["evidence_json"])
 
-    def test_reconstructable_pmxt_initial_gap_uses_matching_kacho_tier_b(self) -> None:
+    def test_reconstructable_pmxt_initial_gap_is_excluded(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             delayed = []
@@ -361,20 +310,6 @@ class PipelineTests(unittest.TestCase):
                         "timestamp_received": row["timestamp_received"] + 1_000,
                     }
                 )
-            kacho = (
-                {
-                    "condition_id": market().condition_id,
-                    "t": market().market_start_ns // 1_000_000_000,
-                    "bu": "0.4",
-                    "au": "0.6",
-                    "su": "1",
-                    "sau": "1",
-                    "bd": "0.4",
-                    "ad": "0.6",
-                    "sd": "1",
-                    "sad": "1",
-                },
-            )
             built = Pipeline(root / "out", StateStore(root / "state"), COMMIT).build(
                 PartitionInputs(
                     Asset.DOGE,
@@ -382,14 +317,14 @@ class PipelineTests(unittest.TestCase):
                     (market(),),
                     tuple(delayed),
                     "fixture",
-                    kacho,
-                    provenance=(provenance("kacho_5m"),),
+                    provenance=(provenance(),),
                 ),
                 market().market_end_ns,
             )
-            self.assertEqual(built.tier, QualityTier.TIER_B)
-            samples = pq.ParquetFile(built.directory / "book-200ms.parquet").read()
-            self.assertEqual(set(samples["quality_tier"].to_pylist()), {"TIER_B"})
+            self.assertEqual(built.tier, QualityTier.EXCLUDED)
+            exclusions = pq.read_table(built.directory / "exclusions.parquet").to_pylist()
+            self.assertEqual(exclusions[0]["reason_code"], "SOURCE_GAP")
+            self.assertNotEqual(exclusions[0]["evidence_json"], "{}")
 
     def test_partition_resource_caps_fail_before_work(self) -> None:
         self.assertEqual(PipelineLimits().max_pmxt_rows, 3_000_000)
@@ -497,7 +432,7 @@ class PipelineTests(unittest.TestCase):
                 pipeline = Pipeline(root / "out", StateStore(root / "state"), COMMIT)
                 identity = pipeline._identity_digest(inputs)
                 StateStore(root / "state").advance(
-                    Checkpoint("DOGE/5m/2026-04-13", interrupted_phase, identity)
+                    Checkpoint("DOGE/15m/2026-04-13", interrupted_phase, identity)
                 )
                 built = pipeline.build(inputs, market().market_end_ns)
                 self.assertEqual(built.checkpoint.phase, Phase.VERIFIED)
@@ -580,13 +515,11 @@ class ReleaseTests(unittest.TestCase):
             backend.ensure_draft("pilot")
             path = fixture / "book.parquet"
             length, digest = hash_file(path)
-            name = f"DOGE--5m--2026-04-13--{digest}--book.parquet"
+            name = f"DOGE--15m--2026-04-13--{digest}--book.parquet"
             backend.starter = ReleaseAsset(
                 name, length, digest, "https://example.test/starter", "starter", "1"
             )
-            assets = Publisher(backend).publish_partition(
-                "pilot", "DOGE/5m/2026-04-13", fixture
-            )
+            assets = Publisher(backend).publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
             self.assertTrue(backend.deleted)
             self.assertTrue(all(asset.state == "uploaded" for asset in assets))
 
@@ -629,7 +562,7 @@ class ReleaseTests(unittest.TestCase):
             path = Path(temp) / "manifest.json"
             path.write_bytes(b"canonical")
             length, digest = hash_file(path)
-            name = f"DOGE--5m--2026-04-13--{digest}--manifest.json"
+            name = f"DOGE--15m--2026-04-13--{digest}--manifest.json"
             expected = ReleaseAsset(name, length, digest, "https://api.example.test/asset")
             backend = ReconcilingBackend(expected)
             with patch(
@@ -670,8 +603,8 @@ class ReleaseTests(unittest.TestCase):
             (first / "manifest.json").write_bytes(b"one")
             (second / "manifest.json").write_bytes(b"two")
             publisher = Publisher(DirectoryReleaseBackend(root / "release"))
-            publisher.publish_partition("draft", "DOGE/5m/2026-04-13", first)
-            publisher.publish_partition("draft", "BNB/5m/2026-04-13", second)
+            publisher.publish_partition("draft", "DOGE/15m/2026-04-13", first)
+            publisher.publish_partition("draft", "BNB/15m/2026-04-13", second)
             self.assertEqual(len(DirectoryReleaseBackend(root / "release").list_assets("draft")), 2)
 
     def _fixture(self, root: Path) -> Path:
@@ -687,8 +620,8 @@ class ReleaseTests(unittest.TestCase):
             fixture = self._fixture(root)
             backend = DirectoryReleaseBackend(root / "remote")
             publisher = Publisher(backend)
-            first = publisher.publish_partition("pilot", "DOGE/5m/2026-04-13", fixture)
-            second = publisher.publish_partition("pilot", "DOGE/5m/2026-04-13", fixture)
+            first = publisher.publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
+            second = publisher.publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
             self.assertEqual(first, second)
             downloaded = download_and_verify_release(backend, "pilot", root / "download")
             self.assertEqual(len(downloaded), 2)
@@ -699,10 +632,10 @@ class ReleaseTests(unittest.TestCase):
             root = Path(temp)
             fixture = self._fixture(root)
             publisher = Publisher(DirectoryReleaseBackend(root / "remote"))
-            publisher.publish_partition("pilot", "DOGE/5m/2026-04-13", fixture)
+            publisher.publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
             (fixture / "book.parquet").write_bytes(b"different")
             with self.assertRaises(ConflictError):
-                publisher.publish_partition("pilot", "DOGE/5m/2026-04-13", fixture)
+                publisher.publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
 
     def test_interruption_is_restartable_and_raw_cleanup_waits_for_publish(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -713,16 +646,16 @@ class ReleaseTests(unittest.TestCase):
             raw.write_bytes(b"raw")
             publisher = Publisher(backend)
             with self.assertRaises(OSError):
-                publisher.publish_partition("pilot", "DOGE/5m/2026-04-13", fixture)
+                publisher.publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
             self.assertTrue(raw.exists())
-            publisher.publish_partition("pilot", "DOGE/5m/2026-04-13", fixture)
+            publisher.publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
 
     def test_download_detects_remote_substitution(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             fixture = self._fixture(root)
             backend = DirectoryReleaseBackend(root / "remote")
-            assets = Publisher(backend).publish_partition("pilot", "DOGE/5m/2026-04-13", fixture)
+            assets = Publisher(backend).publish_partition("pilot", "DOGE/15m/2026-04-13", fixture)
             Path(assets[0].download_url).write_bytes(b"tampered")
             with self.assertRaises(ConflictError):
                 download_and_verify_release(backend, "pilot", root / "download")

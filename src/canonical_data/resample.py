@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 
 from canonical_data.errors import ReconstructionError
-from canonical_data.models import NS_PER_MS, BookState, Market, QualityTier, Sample200ms
+from canonical_data.models import NS_PER_MS, BookState, Market, Sample200ms
 
 
 def resample_200ms(
@@ -77,12 +77,3 @@ def resample_200ms(
         if gap_start is not None:
             gaps.append((gap_start, market.market_end_ns))
     return samples, gaps
-
-
-def tier_b_states(states: Iterable[BookState]) -> list[BookState]:
-    return [
-        BookState(
-            **{**state.__dict__, "quality_tier": QualityTier.TIER_B, "native_interval_ms": 1000}
-        )
-        for state in states
-    ]

@@ -13,6 +13,10 @@ NS_PER_SECOND = 1_000_000_000
 
 
 class Asset(StrEnum):
+    BTC = "BTC"
+    ETH = "ETH"
+    SOL = "SOL"
+    XRP = "XRP"
     DOGE = "DOGE"
     BNB = "BNB"
     HYPE = "HYPE"
@@ -20,7 +24,6 @@ class Asset(StrEnum):
 
 class QualityTier(StrEnum):
     TIER_A = "TIER_A"
-    TIER_B = "TIER_B"
     EXCLUDED = "EXCLUDED"
 
 
@@ -94,7 +97,7 @@ class Market:
     evidence_sha256: str
     exclusion_reason: ExclusionReason | None = None
     venue: str = "polymarket"
-    timeframe: str = "5m"
+    timeframe: str = "15m"
     schema_version: str = SCHEMA_VERSION
 
 
