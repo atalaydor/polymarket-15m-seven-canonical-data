@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import subprocess
 import sys
@@ -16,21 +17,27 @@ from unittest.mock import Mock, patch
 
 from helpers import START_S, market
 
-from canonical_data.errors import ResourceLimitError, SourceError
+from canonical_data.errors import ResourceLimitError, SourceError, UnresolvedMarketError
 from canonical_data.inventory import SourceObject
 from canonical_data.models import Asset
 from canonical_data.sources import OfficialDiscovery
 from scripts.actions_backend import (
+    CANARY_MAX_CANDIDATES,
+    CANARY_MAX_GAMMA_REQUESTS,
+    CANARY_MAX_SOURCE_OBJECTS,
     Authority,
     RemoteAsset,
     _candidate_starts,
-    _pmxt_source_exists,
+    _pmxt_source_identity,
     _raise_child_failure,
     _request,
+    _validate_receipt_coverage,
+    _verify_canary_dispositions,
     day_plan,
-    find_canary_start,
     inventory_anomalies,
     load_authority,
+    minimum_canary_cover,
+    qualify_canary_candidates,
     unfinished_plan,
     verified_partitions,
 )
@@ -39,6 +46,7 @@ from scripts.run_backfill import (
     _market_starts,
     _validate_expected_market_identities,
     _validate_expected_source_identity,
+    run_day,
 )
 
 
@@ -107,14 +115,12 @@ class ActionsBackendTests(unittest.TestCase):
         )
         self.assertEqual(authority.start, datetime(2026, 4, 13, 20, tzinfo=UTC))
         self.assertEqual(authority.cutoff, datetime(2026, 8, 10, 1, tzinfo=UTC))
-        self.assertEqual(
-            authority.canary_search_start, datetime(2026, 8, 9, 23, 30, tzinfo=UTC)
-        )
+        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 9, 23, 45, tzinfo=UTC))
         candidates = _candidate_starts(authority)
-        self.assertEqual(candidates, [1786318200])
+        self.assertEqual(len(candidates), CANARY_MAX_CANDIDATES)
+        self.assertEqual(candidates[0], 1786319100)
+        self.assertEqual(candidates[-1], 1786312800)
         self.assertNotIn(1786320000, candidates)
-        self.assertEqual(len(authority.canary_source_markets), 7)
-        self.assertEqual(len(authority.canary_source_objects), 2)
 
     def test_production_entrypoints_use_import_safe_module_execution(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -223,7 +229,85 @@ class ActionsBackendTests(unittest.TestCase):
             [outside],
         )
 
-    def test_common_canary_candidate_requires_exact_market_for_all_assets(self) -> None:
+    def test_actions_discovery_is_gamma_first_bounded_and_reuses_source_probes(self) -> None:
+        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
+        newest = START_S + 4_500
+        oldest = START_S + 3_600
+        authority = replace(
+            authority,
+            canary_search_start=datetime.fromtimestamp(newest, UTC),
+            canary_search_end=datetime.fromtimestamp(oldest, UTC),
+        )
+        events: list[str] = []
+
+        class FakeGamma:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
+                events.append(f"gamma:{start}:{asset.value}")
+                fixture = replace(
+                    market(asset),
+                    market_id=f"{asset.value}-{start}",
+                    condition_id=f"0x{start + tuple(Asset).index(asset):064x}",
+                    market_start_ns=start * 1_000_000_000,
+                    market_end_ns=(start + 900) * 1_000_000_000,
+                )
+                return fixture, b"payload", f"https://example.test/{asset.value}/{start}"
+
+        def source_identity(source: SourceObject) -> tuple[int, str]:
+            events.append(f"source:{source.url}")
+            return 100, '"stable"'
+
+        with patch("scripts.actions_backend.GammaClient", FakeGamma):
+            result = qualify_canary_candidates(authority, source_identity)
+        self.assertEqual([item.start for item in result.candidates], [newest, oldest])
+        self.assertEqual(result.gamma_requests, 14)
+        self.assertLessEqual(result.gamma_requests, CANARY_MAX_GAMMA_REQUESTS)
+        self.assertEqual(result.source_requests, 2)
+        self.assertLessEqual(result.source_requests, CANARY_MAX_SOURCE_OBJECTS)
+        self.assertTrue(all(item.startswith("gamma:") for item in events[:7]))
+        self.assertEqual(
+            [item.removeprefix("source:") for item in events if item.startswith("source:")],
+            [
+                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-13T19.parquet",
+                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-13T20.parquet",
+            ],
+        )
+
+    def test_multi_window_execution_acquires_one_shared_source_bundle(self) -> None:
+        day = datetime.fromtimestamp(START_S, UTC).date()
+        starts = (START_S, START_S + 900)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spool = root / "shared" / "events.sqlite"
+            spool.parent.mkdir()
+            spool.touch()
+            discoveries = {
+                asset: OfficialDiscovery((market(asset),), ()) for asset in tuple(Asset)[:2]
+            }
+            provenance = {asset: () for asset in discoveries}
+            with (
+                patch(
+                    "scripts.run_backfill.prepare_shared_day",
+                    return_value=(spool, discoveries, provenance, 123),
+                ) as prepare,
+                patch("scripts.run_backfill.run_partition", return_value={}) as partition,
+            ):
+                run_day(
+                    day,
+                    root / "work",
+                    root / "ledger.json",
+                    datetime.fromtimestamp(START_S, UTC),
+                    datetime.fromtimestamp(START_S + 1_800, UTC),
+                    tuple(discoveries),
+                    starts,
+                )
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args[5], starts)
+        self.assertEqual([call.args[8] for call in partition.call_args_list], [123, 0])
+
+    def test_actions_discovery_fails_closed_on_unresolved_gamma(self) -> None:
         authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
         canary_start = START_S + 3_600
         authority = replace(
@@ -231,9 +315,80 @@ class ActionsBackendTests(unittest.TestCase):
             canary_search_start=datetime.fromtimestamp(canary_start, UTC),
             canary_search_end=datetime.fromtimestamp(canary_start, UTC),
         )
-        probed: list[str] = []
+
+        class UnresolvedGamma:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
+                raise UnresolvedMarketError(f"{asset.value}-{start}", "market", "condition")
+
+        source_probe = Mock(return_value=(100, '"stable"'))
+        with (
+            patch("scripts.actions_backend.GammaClient", UnresolvedGamma),
+            self.assertRaisesRegex(RuntimeError, "no authoritative 15m candidates"),
+        ):
+            qualify_canary_candidates(authority, source_probe)
+        source_probe.assert_not_called()
+
+    def test_actions_discovery_fails_closed_on_unexplained_source_absence(self) -> None:
+        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
+        canary_start = START_S + 3_600
+        authority = replace(
+            authority,
+            canary_search_start=datetime.fromtimestamp(canary_start, UTC),
+            canary_search_end=datetime.fromtimestamp(canary_start, UTC),
+        )
 
         class FakeGamma:
+            calls = 0
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
+                self.__class__.calls += 1
+                fixture = replace(
+                    market(asset),
+                    market_id=f"{asset.value}-{start}",
+                    condition_id=f"0x{start + tuple(Asset).index(asset):064x}",
+                    market_start_ns=start * 1_000_000_000,
+                    market_end_ns=(start + 900) * 1_000_000_000,
+                )
+                return fixture, b"payload", "https://example.test/gamma"
+
+        def missing(source: SourceObject) -> tuple[int, str]:
+            raise RuntimeError(f"catalog-listed PMXT canary source is missing: {source.url}")
+
+        with (
+            patch("scripts.actions_backend.GammaClient", FakeGamma),
+            self.assertRaisesRegex(RuntimeError, "catalog-listed PMXT canary source is missing"),
+        ):
+            qualify_canary_candidates(authority, missing)
+        self.assertEqual(FakeGamma.calls, 7)
+
+    def test_actions_discovery_rejects_mismatched_or_reused_asset_identity(self) -> None:
+        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
+        canary_start = START_S + 3_600
+        authority = replace(
+            authority,
+            canary_search_start=datetime.fromtimestamp(canary_start, UTC),
+            canary_search_end=datetime.fromtimestamp(canary_start, UTC),
+        )
+
+        class MismatchedGamma:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
+                fixture = replace(
+                    market(Asset.BTC),
+                    market_start_ns=start * 1_000_000_000,
+                    market_end_ns=(start + 900) * 1_000_000_000,
+                )
+                return fixture, b"payload", "https://example.test/gamma"
+
+        class ReusedGamma:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
 
@@ -245,55 +400,33 @@ class ActionsBackendTests(unittest.TestCase):
                 )
                 return fixture, b"payload", "https://example.test/gamma"
 
-        def source_exists(
-            source: SourceObject, _identity: tuple[int, str] | None
-        ) -> bool:
-            probed.append(source.url)
-            return True
-
-        with patch("scripts.actions_backend.GammaClient", FakeGamma):
-            start, markets, attempts = find_canary_start(authority, source_exists)
-        self.assertEqual(start, canary_start)
-        self.assertEqual(set(markets), set(Asset))
-        self.assertEqual(attempts, 7)
-        self.assertEqual(
-            probed,
-            [
-                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-13T19.parquet",
-                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-13T20.parquet",
-            ],
-        )
-
-    def test_canary_fails_closed_before_gamma_for_catalog_listed_404(self) -> None:
-        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
-        canary_start = START_S + 3_600
-        authority = replace(
-            authority,
-            canary_search_start=datetime.fromtimestamp(canary_start, UTC),
-            canary_search_end=datetime.fromtimestamp(canary_start, UTC),
-        )
-        with (
-            patch("scripts.actions_backend.GammaClient") as gamma,
-            self.assertRaisesRegex(RuntimeError, "catalog-listed PMXT canary source is missing"),
+        for gamma, message in (
+            (MismatchedGamma, "violates exact 15m identity"),
+            (ReusedGamma, "reused an identity"),
         ):
-            find_canary_start(authority, lambda _source, _identity: False)
-        gamma.return_value.fetch_market.assert_not_called()
+            source_probe = Mock(return_value=(100, '"stable"'))
+            with (
+                self.subTest(gamma=gamma.__name__),
+                patch("scripts.actions_backend.GammaClient", gamma),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                qualify_canary_candidates(authority, source_probe)
+            source_probe.assert_not_called()
 
-    def test_canary_source_probe_binds_recorded_object_identity(self) -> None:
+    def test_canary_source_probe_captures_object_identity(self) -> None:
         source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
         response = FakeResponse(b"")
         response.headers.replace_header("Content-Length", "123")
         response.headers["ETag"] = '"stable"'
         with patch("scripts.actions_backend.urllib.request.urlopen", return_value=response):
-            self.assertTrue(_pmxt_source_exists(source, (123, '"stable"')))
+            self.assertEqual(_pmxt_source_identity(source), (123, '"stable"'))
         changed = FakeResponse(b"")
-        changed.headers.replace_header("Content-Length", "124")
-        changed.headers["ETag"] = '"changed"'
+        changed.headers.replace_header("Content-Length", "0")
         with (
             patch("scripts.actions_backend.urllib.request.urlopen", return_value=changed),
-            self.assertRaisesRegex(RuntimeError, "source identity changed"),
+            self.assertRaisesRegex(RuntimeError, "lacks object identity"),
         ):
-            _pmxt_source_exists(source, (123, '"stable"'))
+            _pmxt_source_identity(source)
 
     def test_child_acquisition_must_match_source_qualified_object(self) -> None:
         source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
@@ -306,45 +439,21 @@ class ActionsBackendTests(unittest.TestCase):
         discovered = market(Asset.BTC)
         discoveries = {Asset.BTC: OfficialDiscovery((discovered,), ())}
         expected = {
-            Asset.BTC: (
-                discovered.condition_id,
-                frozenset((discovered.token_up, discovered.token_down)),
+            Asset.BTC: frozenset(
+                (
+                    (
+                        discovered.condition_id,
+                        frozenset((discovered.token_up, discovered.token_down)),
+                    ),
+                )
             )
         }
         _validate_expected_market_identities(discoveries, expected)
-        expected[Asset.BTC] = ("0x" + "b" * 64, expected[Asset.BTC][1])
+        expected[Asset.BTC] = frozenset(
+            (("0x" + "b" * 64, frozenset((discovered.token_up, discovered.token_down))),)
+        )
         with self.assertRaisesRegex(SourceError, "source-qualified canary identity"):
             _validate_expected_market_identities(discoveries, expected)
-
-    def test_canary_candidate_must_match_source_qualified_identity(self) -> None:
-        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
-        canary_start = START_S + 3_600
-        authority = replace(
-            authority,
-            canary_search_start=datetime.fromtimestamp(canary_start, UTC),
-            canary_search_end=datetime.fromtimestamp(canary_start, UTC),
-            canary_source_markets=(
-                (Asset.BTC, "0x" + "a" * 64, frozenset(("1", "2"))),
-            ),
-        )
-
-        class FakeGamma:
-            def __init__(self, *args: object, **kwargs: object) -> None:
-                pass
-
-            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
-                fixture = replace(
-                    market(asset),
-                    market_start_ns=start * 1_000_000_000,
-                    market_end_ns=(start + 900) * 1_000_000_000,
-                )
-                return fixture, b"payload", "https://example.test/gamma"
-
-        with (
-            patch("scripts.actions_backend.GammaClient", FakeGamma),
-            self.assertRaisesRegex(RuntimeError, "source-qualified identity"),
-        ):
-            find_canary_start(authority, lambda _source, _identity: True)
 
     def test_canary_candidate_outside_catalog_is_rejected_before_probe(self) -> None:
         authority = replace(
@@ -353,9 +462,98 @@ class ActionsBackendTests(unittest.TestCase):
             canary_search_end=datetime(2026, 8, 14, 23, tzinfo=UTC),
         )
         source_probe = Mock(return_value=True)
-        with self.assertRaisesRegex(SourceError, "authoritative catalog"):
-            find_canary_start(authority, source_probe)
+
+        class FakeGamma:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
+                fixture = replace(
+                    market(asset),
+                    market_id=f"{asset.value}-{start}",
+                    condition_id=f"0x{start + tuple(Asset).index(asset):064x}",
+                    market_start_ns=start * 1_000_000_000,
+                    market_end_ns=(start + 900) * 1_000_000_000,
+                )
+                return fixture, b"payload", "https://example.test/gamma"
+
+        with (
+            patch("scripts.actions_backend.GammaClient", FakeGamma),
+            self.assertRaisesRegex(SourceError, "authoritative catalog"),
+        ):
+            qualify_canary_candidates(authority, source_probe)
         source_probe.assert_not_called()
+
+    def test_canary_cover_prefers_one_common_window(self) -> None:
+        assets = frozenset(Asset)
+        self.assertEqual(
+            minimum_canary_cover({3: assets, 2: frozenset((Asset.BTC,)), 1: assets}),
+            (3,),
+        )
+
+    def test_canary_cover_uses_minimum_windows_and_ignores_excluded_assets(self) -> None:
+        first = frozenset(tuple(Asset)[:4])
+        second = frozenset(tuple(Asset)[4:])
+        self.assertEqual(minimum_canary_cover({3: first, 2: second, 1: first}), (3, 2))
+        with self.assertRaisesRegex(RuntimeError, "no usable evidence cover"):
+            minimum_canary_cover({3: frozenset(tuple(Asset)[:-1])})
+
+    def test_remote_exclusion_is_a_disposition_but_not_usable_coverage(self) -> None:
+        accepted = replace(market(Asset.BTC), market_id="accepted")
+        excluded = replace(
+            market(Asset.BTC),
+            market_id="excluded",
+            market_start_ns=accepted.market_start_ns + 900_000_000_000,
+            market_end_ns=accepted.market_end_ns + 900_000_000_000,
+        )
+        accepted_rows = [
+            {
+                "market_id": accepted.market_id,
+                "condition_id": accepted.condition_id,
+                "token_up": accepted.token_up,
+                "token_down": accepted.token_down,
+                "market_start_ns": accepted.market_start_ns,
+                "quality_tier": "TIER_A",
+            }
+        ]
+        excluded_rows = [
+            {
+                "market_id": excluded.market_id,
+                "evidence_json": json.dumps({"condition_id": excluded.condition_id}),
+            }
+        ]
+        self.assertEqual(
+            _verify_canary_dispositions(
+                accepted_rows,
+                excluded_rows,
+                {accepted.market_id: accepted, excluded.market_id: excluded},
+            ),
+            [accepted.market_start_ns // 1_000_000_000],
+        )
+
+    def test_receipt_recomputes_proof_bound_minimum_cover(self) -> None:
+        authority = self.authority()
+        first_assets = tuple(Asset)[:4]
+        usable = {asset.value: [3] if asset in first_assets else [2] for asset in authority.assets}
+        receipt = {
+            "usable_market_starts_by_asset": usable,
+            "remote_proofs": {
+                asset.value: {
+                    "accepted_market_starts": usable[asset.value],
+                    "manifest_sha256": "a" * 64,
+                    "quality": "TIER_A",
+                }
+                for asset in authority.assets
+            },
+            "selected_market_starts": [3, 2],
+            "asset_market_starts": {
+                asset.value: usable[asset.value][0] for asset in authority.assets
+            },
+        }
+        _validate_receipt_coverage(receipt, authority, [3, 2, 1])
+        receipt["selected_market_starts"] = [3, 2, 1]
+        with self.assertRaisesRegex(RuntimeError, "exact usable minimum cover"):
+            _validate_receipt_coverage(receipt, authority, [3, 2, 1])
 
     def test_canary_candidate_search_is_bounded(self) -> None:
         authority = replace(

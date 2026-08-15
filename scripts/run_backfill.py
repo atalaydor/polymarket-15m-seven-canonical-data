@@ -182,7 +182,7 @@ def _market_starts(
 
 def _validate_expected_market_identities(
     discoveries: dict[Asset, OfficialDiscovery],
-    expected: dict[Asset, tuple[str, frozenset[str]]] | None,
+    expected: dict[Asset, frozenset[tuple[str, frozenset[str]]]] | None,
 ) -> None:
     if expected is None:
         return
@@ -193,7 +193,7 @@ def _validate_expected_market_identities(
             (market.condition_id, frozenset((market.token_up, market.token_down)))
             for market in discovery.markets
         }
-        if actual != {expected[asset]}:
+        if actual != expected[asset]:
             raise SourceError("child discovery does not match source-qualified canary identity")
 
 
@@ -216,7 +216,7 @@ def prepare_shared_day(
     cutoff: datetime,
     assets: tuple[Asset, ...] = tuple(Asset),
     starts: tuple[int, ...] | None = None,
-    expected_market_identities: dict[Asset, tuple[str, frozenset[str]]] | None = None,
+    expected_market_identities: dict[Asset, frozenset[tuple[str, frozenset[str]]]] | None = None,
     expected_source_identities: dict[str, tuple[int, str]] | None = None,
 ) -> tuple[
     Path,
@@ -257,9 +257,9 @@ def prepare_shared_day(
     last_end_ns = max(market.market_end_ns for market in combined_markets)
     inventory_start_ns = max(first_start_ns - 3_600_000_000_000, 0)
     source_objects = pmxt_hourly_objects(inventory_start_ns, last_end_ns)
-    if expected_source_identities is not None and {
-        source.url for source in source_objects
-    } != set(expected_source_identities):
+    if expected_source_identities is not None and {source.url for source in source_objects} != set(
+        expected_source_identities
+    ):
         raise SourceError("qualified PMXT objects do not match the execution source set")
     with EventSpool(spool_path, create_index=False) as spool:
         spool.drop_index()
@@ -402,7 +402,7 @@ def run_day(
     assets: tuple[Asset, ...],
     starts: tuple[int, ...] | None = None,
     release_prefix: str = DATASET_RELEASE_PREFIX,
-    expected_market_identities: dict[Asset, tuple[str, frozenset[str]]] | None = None,
+    expected_market_identities: dict[Asset, frozenset[tuple[str, frozenset[str]]]] | None = None,
     expected_source_identities: dict[str, tuple[int, str]] | None = None,
 ) -> list[dict[str, Any]]:
     spool, discoveries, provenance, source_bytes = prepare_shared_day(
@@ -465,11 +465,14 @@ def main() -> None:
     if args.expected_market_identities is not None:
         raw_expected = json.loads(args.expected_market_identities.read_bytes())
         expected_market_identities = {
-            Asset(asset): (
-                str(value["condition_id"]),
-                frozenset(str(token) for token in value["token_ids"]),
+            Asset(asset): frozenset(
+                (
+                    str(value["condition_id"]),
+                    frozenset(str(token) for token in value["token_ids"]),
+                )
+                for value in values
             )
-            for asset, value in raw_expected.items()
+            for asset, values in raw_expected.items()
         }
     expected_source_identities = None
     if args.expected_source_identities is not None:

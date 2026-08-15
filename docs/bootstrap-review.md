@@ -20,9 +20,9 @@ responsibility of the one Actions canary.
 The source-404 review corrected inherited raw-object metadata that had been reused as market
 coverage and a finite cutoff that extended beyond the authoritative PMXT catalog. The first raw
 hour is now reserved for reconstruction warm-up, the cutoff is bounded by the last catalog object,
-and canary candidates verify their two required source objects before discovery. No unresolved
-local conflict remains after focused verification. The remaining boundary is one real Actions
-canary dispatch; bulk production is intentionally not launched.
+and canary candidates stay within that coverage. No unresolved local conflict remains after focused
+verification. The remaining boundary is one real Actions canary dispatch; bulk production is
+intentionally not launched.
 
 Run 31899002607 then proved shared acquisition and real seven-asset filtering but exposed a common
 reconstruction defect: every bounded stream began with an incremental update, and the implementation
@@ -31,4 +31,11 @@ window was also unsuitable: BNB and HYPE did not receive their first full snapsh
 window started. The replacement 23:30 window has pre-start snapshots for both tokens of all seven
 assets and is frozen in `config/canary-source-evidence.json`. The 42 digest-verified v1 draft assets
 remain isolated evidence as recorded in `canary-v1-exclusion-reconciliation.json`; corrected canary
-output uses the v2 namespace, and production authority remains locked pending that canary.
+output used the v2 namespace.
+
+Run 31902521041 proved that the v2 23:30 window was also unsuitable: every asset had a native
+post-snapshot BBO/depth contradiction and was legitimately published as `EVENT_CONFLICT`. The v1
+and v2 Releases remain immutable isolated evidence. Replacement qualification now runs only on
+GitHub Actions: eight candidates share one bounded source bundle, fresh Gamma evidence precedes
+PMXT HEADs, and authenticated Tier A rows select a common window or the exact minimum multi-window
+cover. Production remains locked pending the v3 receipt.

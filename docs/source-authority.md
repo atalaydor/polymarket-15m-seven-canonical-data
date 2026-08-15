@@ -14,10 +14,12 @@ Discovery is limited to `^(btc|eth|sol|xrp|doge|bnb|hype)-updown-15m-[0-9]{10}$`
 The timestamp must be 15-minute aligned and the official window must be exactly 900 seconds.
 Unknown identity, rules, outcome, stream binding, or source fidelity fails closed.
 Canary candidates must be inside the frozen validation coverage, avoid the three catalog-proven
-empty hours, and pass bounded HEAD checks for both their warm-up and market-hour objects. The single
-canary candidate is additionally pinned by `config/canary-source-evidence.json`: both official
-outcome tokens for all seven conditions have a full PMXT `book` before the window begins. A 404 for
-an object listed by the frozen catalog is an authority conflict and aborts; it is not an exclusion.
+empty hours, and pass bounded HEAD checks for their warm-up and market-hour objects. GitHub Actions
+retrieves and hashes fresh Gamma payloads before any PMXT probe, then binds the resulting condition
+and token sets plus the HEAD length/ETag through acquisition and authenticated publication. The
+earlier `config/canary-source-evidence.json` remains the historical v2 qualification record and is
+not authority for v3 candidates. A 404 for an object listed by the frozen catalog is an authority
+conflict and aborts; it is not an exclusion.
 
 PMXT hourly files are bounded slices of the continuous official market-channel stream. The official
 channel defines `book` as a full order-book snapshot; `price_change` and `tick_size_change` are
