@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,14 @@ import pyarrow.parquet as pq
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.discovery import GammaClient
 from canonical_data.errors import IdentityError, UnresolvedMarketError
+from canonical_data.httpclient import USER_AGENT
+from canonical_data.inventory import (
+    PMXT_MISSING_OBJECT_URLS,
+    PMXT_OBJECT_COVERAGE_CUTOFF,
+    PMXT_VALIDATION_COVERAGE_START,
+    SourceObject,
+    pmxt_hourly_objects,
+)
 from canonical_data.models import Asset
 from canonical_data.planner import build_backfill_plan, release_bucket
 from canonical_data.quality import classify
@@ -138,8 +147,18 @@ def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
     )
     if authority.cutoff <= authority.start:
         raise RuntimeError("release cutoff must follow release start")
+    if (
+        authority.start < PMXT_VALIDATION_COVERAGE_START
+        or authority.cutoff > PMXT_OBJECT_COVERAGE_CUTOFF
+    ):
+        raise RuntimeError("production coverage exceeds authoritative PMXT validation coverage")
     if authority.canary_search_start < authority.canary_search_end:
         raise RuntimeError("canary search must run newest to oldest")
+    if (
+        authority.canary_search_end < authority.start
+        or authority.canary_search_start + timedelta(minutes=15) > authority.cutoff
+    ):
+        raise RuntimeError("canary search exceeds production source coverage")
     if authority.canary_step_minutes not in {15, 30, 60}:
         raise RuntimeError("canary search step is outside the finite allowed set")
     return authority
@@ -520,10 +539,48 @@ def _candidate_starts(authority: Authority) -> list[int]:
     return result
 
 
-def find_canary_start(authority: Authority) -> tuple[int, dict[Asset, Any], int]:
+def _pmxt_source_exists(source: SourceObject) -> bool:
+    request = urllib.request.Request(source.url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    last_error: Exception | None = None
+    for attempt, delay in enumerate((0, *TRANSFER_RETRY_DELAYS)):
+        if delay:
+            time.sleep(delay)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                status = int(response.status)
+                return 200 <= status < 300
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            if exc.code not in TRANSIENT_HTTP_STATUS:
+                raise
+            last_error = exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+        if attempt == len(TRANSFER_RETRY_DELAYS):
+            break
+    assert last_error is not None
+    raise last_error
+
+
+def find_canary_start(
+    authority: Authority,
+    source_exists: Callable[[SourceObject], bool] = _pmxt_source_exists,
+) -> tuple[int, dict[Asset, Any], int]:
     gamma = GammaClient(fetch=_fetch_gamma)
     attempts = 0
     for start in _candidate_starts(authority):
+        source_objects = pmxt_hourly_objects(
+            (start - 3_600) * 1_000_000_000,
+            (start + 900) * 1_000_000_000,
+        )
+        if any(source.url in PMXT_MISSING_OBJECT_URLS for source in source_objects):
+            continue
+        for source in source_objects:
+            if not source_exists(source):
+                raise RuntimeError(
+                    f"catalog-listed PMXT canary source is missing: {source.url}"
+                )
         markets: dict[Asset, Any] = {}
         rejected = False
         for asset in authority.assets:

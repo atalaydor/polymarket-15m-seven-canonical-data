@@ -17,8 +17,9 @@ responsibility of the one Actions canary.
 - **Resumability:** plans derive from remote durable assets, days appear once, durable partitions zero
   times, and each day recomputes only unfinished assets before independent publication.
 
-The review found and repaired two locally solvable issues: inherited dates were replaced by the
-timeframe-neutral PMXT coverage boundary plus a new finite cutoff, and monthly Release buckets were
-split into bounded half-month groups. No unresolved local conflict remains after focused
-verification. The remaining boundary is one real Actions canary dispatch; bulk production is
-intentionally not launched.
+The source-404 review corrected inherited raw-object metadata that had been reused as market
+coverage and a finite cutoff that extended beyond the authoritative PMXT catalog. The first raw
+hour is now reserved for reconstruction warm-up, the cutoff is bounded by the last catalog object,
+and canary candidates verify their two required source objects before discovery. No unresolved
+local conflict remains after focused verification. The remaining boundary is one real Actions
+canary dispatch; bulk production is intentionally not launched.

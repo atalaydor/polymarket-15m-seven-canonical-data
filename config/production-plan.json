@@ -2,8 +2,8 @@
   "schema_version": "1.0.0",
   "dataset_id": "polymarket-15m-seven-v1",
   "status": "CANARY_REQUIRED",
-  "coverage_start": "2026-04-13T19:00:00Z",
-  "release_cutoff": "2026-08-15T00:00:00Z",
+  "coverage_start": "2026-04-13T20:00:00Z",
+  "release_cutoff": "2026-08-10T01:00:00Z",
   "partition": {
     "unit": "asset/timeframe/utc_date",
     "assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
@@ -35,8 +35,8 @@
   "canary": {
     "scope": "one resolved common 15m window across all seven assets",
     "search": {
-      "start": "2026-08-14T23:00:00Z",
-      "end": "2026-08-13T00:00:00Z",
+      "start": "2026-08-10T00:00:00Z",
+      "end": "2026-08-08T01:00:00Z",
       "step_minutes": 60
     },
     "full_plan_unlock": "committed config/canary-receipt.json with PASSED status"

@@ -8,6 +8,14 @@ from datetime import UTC, date, datetime, timedelta
 from canonical_data.errors import SourceError
 from canonical_data.models import Asset
 
+PMXT_OBJECT_COVERAGE_START = datetime(2026, 4, 13, 19, tzinfo=UTC)
+PMXT_OBJECT_COVERAGE_CUTOFF = datetime(2026, 8, 10, 1, tzinfo=UTC)
+PMXT_VALIDATION_COVERAGE_START = datetime(2026, 4, 13, 20, tzinfo=UTC)
+PMXT_MISSING_OBJECT_URLS = frozenset(
+    f"https://r2v2.pmxt.dev/polymarket_orderbook_2026-06-11T{hour}.parquet"
+    for hour in ("04", "05", "06")
+)
+
 
 @dataclass(frozen=True)
 class SourceObject:
@@ -35,6 +43,10 @@ def expected_15m_market_starts(day: date, coverage_start: datetime, cutoff: date
 def pmxt_hourly_objects(start_ns: int, end_ns: int) -> list[SourceObject]:
     if end_ns <= start_ns:
         raise SourceError("inventory range must be positive")
+    catalog_start_ns = int(PMXT_OBJECT_COVERAGE_START.timestamp()) * 1_000_000_000
+    catalog_cutoff_ns = int(PMXT_OBJECT_COVERAGE_CUTOFF.timestamp()) * 1_000_000_000
+    if start_ns < catalog_start_ns or end_ns > catalog_cutoff_ns:
+        raise SourceError("PMXT inventory range exceeds the frozen authoritative catalog")
     start = datetime.fromtimestamp(start_ns // 1_000_000_000, UTC).replace(
         minute=0, second=0, microsecond=0
     )

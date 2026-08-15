@@ -7,7 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +18,9 @@ from canonical_data.binance import SYMBOLS, ingest_binance_zip
 from canonical_data.discovery import GammaClient
 from canonical_data.errors import ResourceLimitError, SourceError
 from canonical_data.inventory import (
+    PMXT_OBJECT_COVERAGE_CUTOFF,
+    PMXT_OBJECT_COVERAGE_START,
+    PMXT_VALIDATION_COVERAGE_START,
     SourceObject,
     binance_daily_objects,
     expected_15m_market_starts,
@@ -69,20 +72,20 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                 )
 
     def test_15m_inventory_is_exact_at_full_and_partial_days(self) -> None:
-        coverage_start = datetime(2026, 4, 13, 19, tzinfo=UTC)
-        cutoff = datetime(2026, 8, 15, tzinfo=UTC)
+        coverage_start = PMXT_VALIDATION_COVERAGE_START
+        cutoff = PMXT_OBJECT_COVERAGE_CUTOFF
         self.assertEqual(
-            len(expected_15m_market_starts(date(2026, 4, 13), coverage_start, cutoff)), 20
+            len(expected_15m_market_starts(date(2026, 4, 13), coverage_start, cutoff)), 16
         )
         self.assertEqual(
             len(expected_15m_market_starts(date(2026, 4, 15), coverage_start, cutoff)), 96
         )
 
     def test_finite_backfill_plan_is_ordered_and_bounded_by_half_month(self) -> None:
-        plan = build_backfill_plan(date(2026, 4, 13), date(2026, 8, 14))
-        self.assertEqual(len(plan), 868)
+        plan = build_backfill_plan(date(2026, 4, 13), date(2026, 8, 10))
+        self.assertEqual(len(plan), 840)
         self.assertEqual(plan[0]["partition_id"], "BTC/15m/2026-04-13")
-        self.assertEqual(plan[-1]["partition_id"], "HYPE/15m/2026-08-14")
+        self.assertEqual(plan[-1]["partition_id"], "HYPE/15m/2026-08-10")
         groups = {row["release_group"] for row in plan}
         self.assertEqual(len(groups), 9)
         self.assertLessEqual(
@@ -151,6 +154,16 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
         self.assertTrue(items[0].url.endswith("2026-04-13T19.parquet"))
         exact_hour = pmxt_hourly_objects(START_NS, START_NS + 3_600_000_000_000)
         self.assertEqual(len(exact_hour), 1)
+        with self.assertRaisesRegex(SourceError, "authoritative catalog"):
+            pmxt_hourly_objects(
+                int(PMXT_OBJECT_COVERAGE_START.timestamp() - 1) * 1_000_000_000,
+                START_NS + 1,
+            )
+        with self.assertRaisesRegex(SourceError, "authoritative catalog"):
+            pmxt_hourly_objects(
+                START_NS,
+                int(PMXT_OBJECT_COVERAGE_CUTOFF.timestamp() + 1) * 1_000_000_000,
+            )
         hype = binance_daily_objects(Asset.HYPE, "2026-04-13", ("trades", "markPriceKlines"))
         self.assertTrue(all("futures/um" in item.url for item in hype))
         doge = binance_daily_objects(Asset.DOGE, "2026-04-13", ("klines",))

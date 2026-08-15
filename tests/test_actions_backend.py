@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from email.message import Message
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from helpers import START_S, market
 
@@ -98,6 +98,8 @@ class ActionsBackendTests(unittest.TestCase):
             [asset.value for asset in authority.assets],
             ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
         )
+        self.assertEqual(authority.start, datetime(2026, 4, 13, 20, tzinfo=UTC))
+        self.assertEqual(authority.cutoff, datetime(2026, 8, 10, 1, tzinfo=UTC))
         self.assertEqual(len(_candidate_starts(authority)), 48)
 
     def test_production_entrypoints_use_import_safe_module_execution(self) -> None:
@@ -209,6 +211,13 @@ class ActionsBackendTests(unittest.TestCase):
 
     def test_common_canary_candidate_requires_exact_market_for_all_assets(self) -> None:
         authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
+        canary_start = START_S + 3_600
+        authority = replace(
+            authority,
+            canary_search_start=datetime.fromtimestamp(canary_start, UTC),
+            canary_search_end=datetime.fromtimestamp(canary_start, UTC),
+        )
+        probed: list[str] = []
 
         class FakeGamma:
             def __init__(self, *args: object, **kwargs: object) -> None:
@@ -222,11 +231,48 @@ class ActionsBackendTests(unittest.TestCase):
                 )
                 return fixture, b"payload", "https://example.test/gamma"
 
+        def source_exists(source: SourceObject) -> bool:
+            probed.append(source.url)
+            return True
+
         with patch("scripts.actions_backend.GammaClient", FakeGamma):
-            start, markets, attempts = find_canary_start(authority)
-        self.assertEqual(start, START_S)
+            start, markets, attempts = find_canary_start(authority, source_exists)
+        self.assertEqual(start, canary_start)
         self.assertEqual(set(markets), set(Asset))
         self.assertEqual(attempts, 7)
+        self.assertEqual(
+            probed,
+            [
+                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-13T19.parquet",
+                "https://r2v2.pmxt.dev/polymarket_orderbook_2026-04-13T20.parquet",
+            ],
+        )
+
+    def test_canary_fails_closed_before_gamma_for_catalog_listed_404(self) -> None:
+        authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))
+        canary_start = START_S + 3_600
+        authority = replace(
+            authority,
+            canary_search_start=datetime.fromtimestamp(canary_start, UTC),
+            canary_search_end=datetime.fromtimestamp(canary_start, UTC),
+        )
+        with (
+            patch("scripts.actions_backend.GammaClient") as gamma,
+            self.assertRaisesRegex(RuntimeError, "catalog-listed PMXT canary source is missing"),
+        ):
+            find_canary_start(authority, lambda _source: False)
+        gamma.return_value.fetch_market.assert_not_called()
+
+    def test_canary_candidate_outside_catalog_is_rejected_before_probe(self) -> None:
+        authority = replace(
+            self.authority(),
+            canary_search_start=datetime(2026, 8, 14, 23, tzinfo=UTC),
+            canary_search_end=datetime(2026, 8, 14, 23, tzinfo=UTC),
+        )
+        source_probe = Mock(return_value=True)
+        with self.assertRaisesRegex(SourceError, "authoritative catalog"):
+            find_canary_start(authority, source_probe)
+        source_probe.assert_not_called()
 
     def test_canary_candidate_search_is_bounded(self) -> None:
         authority = replace(

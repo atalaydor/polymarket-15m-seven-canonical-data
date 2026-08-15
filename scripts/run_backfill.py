@@ -23,7 +23,12 @@ from canonical_data.audit import canonical_json_bytes
 from canonical_data.discovery import GammaClient
 from canonical_data.errors import ResourceLimitError, SourceError
 from canonical_data.httpclient import USER_AGENT
-from canonical_data.inventory import SourceObject, expected_15m_market_starts, pmxt_hourly_objects
+from canonical_data.inventory import (
+    PMXT_MISSING_OBJECT_URLS,
+    SourceObject,
+    expected_15m_market_starts,
+    pmxt_hourly_objects,
+)
 from canonical_data.models import Asset, BookEvent, Market, Provenance
 from canonical_data.pipeline import PartitionInputs, Pipeline, PipelineLimits
 from canonical_data.planner import release_bucket
@@ -42,11 +47,11 @@ MAX_SOURCE_OBJECT_BYTES = 800_000_000
 # These immutable hourly objects span every Polymarket condition; their identities
 # and observed absence are timeframe-neutral. The canary records fresh access.
 PMXT_HTTP_404_GAPS = {
-    f"https://r2v2.pmxt.dev/polymarket_orderbook_2026-06-11T{hour}.parquet": {
-        "accessed_at": "2026-08-14",
+    url: {
+        "accessed_at": "2026-08-15",
         "http_status": 404,
     }
-    for hour in ("04", "05", "06")
+    for url in PMXT_MISSING_OBJECT_URLS
 }
 
 

@@ -63,15 +63,38 @@ def offline_audit(root: Path | None = None) -> dict[str, Any]:
     if production["dataset_id"] != "polymarket-15m-seven-v1":
         errors.append("production dataset identity changed")
     if (
-        production.get("coverage_start") != "2026-04-13T19:00:00Z"
-        or production.get("release_cutoff") != "2026-08-15T00:00:00Z"
+        production.get("coverage_start") != "2026-04-13T20:00:00Z"
+        or production.get("release_cutoff") != "2026-08-10T01:00:00Z"
     ):
         errors.append("production coverage boundary changed")
-    if neutral_evidence.get(
-        "evidence_class"
-    ) != "timeframe_neutral_raw_source_catalog_metadata" or neutral_evidence[
-        "extracted_pmxt_catalog"
-    ].get("start") != production.get("coverage_start"):
+    catalog = neutral_evidence.get("refreshed_pmxt_catalog", {})
+    validation = neutral_evidence.get("validation_coverage", {})
+    pmxt_source: dict[str, Any] = next(
+        (source for source in sources["sources"] if source["id"] == "pmxt_v2"), {}
+    )
+    missing_hours = [
+        "2026-06-11T04:00:00Z",
+        "2026-06-11T05:00:00Z",
+        "2026-06-11T06:00:00Z",
+    ]
+    if (
+        neutral_evidence.get("evidence_class")
+        != "timeframe_neutral_raw_source_catalog_metadata"
+        or catalog.get("object_start") != "2026-04-13T19:00:00Z"
+        or catalog.get("object_end") != "2026-08-10T00:00:00Z"
+        or catalog.get("objects") != 2835
+        or catalog.get("expected_hour_keys") != 2838
+        or catalog.get("missing_hour_keys") != missing_hours
+        or validation.get("start") != production.get("coverage_start")
+        or validation.get("cutoff") != production.get("release_cutoff")
+        or validation.get("lookback_hours") != 1
+        or pmxt_source.get("accessed_at") != "2026-08-15"
+        or pmxt_source.get("catalog_url") != catalog.get("catalog_url")
+        or pmxt_source.get("object_coverage_start") != catalog.get("object_start")
+        or pmxt_source.get("object_coverage_end") != catalog.get("object_end")
+        or pmxt_source.get("validation_coverage_start") != validation.get("start")
+        or pmxt_source.get("validation_coverage_cutoff") != validation.get("cutoff")
+    ):
         errors.append("PMXT coverage lacks timeframe-neutral evidence")
     if production["partition"] != {
         "unit": "asset/timeframe/utc_date",

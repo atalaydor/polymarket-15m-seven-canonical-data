@@ -21,5 +21,26 @@
     "bounded_range_bytes": 65536,
     "bounded_range_sha256": "73902cbaac03b4300f8436f2ba0724e57349fee316898168ad06d42ca713ee96"
   },
+  "refreshed_pmxt_catalog": {
+    "catalog_url": "https://archive.pmxt.dev/Polymarket/v2",
+    "documentation_url": "https://archive.pmxt.dev/docs/v2-data-overview",
+    "accessed_at": "2026-08-15",
+    "objects": 2835,
+    "object_start": "2026-04-13T19:00:00Z",
+    "object_end": "2026-08-10T00:00:00Z",
+    "expected_hour_keys": 2838,
+    "missing_hour_keys": [
+      "2026-06-11T04:00:00Z",
+      "2026-06-11T05:00:00Z",
+      "2026-06-11T06:00:00Z"
+    ],
+    "missing_key_semantics": "The PMXT v2 documentation states that empty hours are skipped and a missing key means zero events for that hour."
+  },
+  "validation_coverage": {
+    "start": "2026-04-13T20:00:00Z",
+    "cutoff": "2026-08-10T01:00:00Z",
+    "lookback_hours": 1,
+    "reason": "The 19:00 first raw object is required as reconstruction warm-up for the first validated 20:00 market; the 00:00 last raw object supports 15m markets ending at the exclusive 01:00 cutoff."
+  },
   "reuse_boundary": "Only PMXT raw archive catalog/object metadata is reused. All 5m market identities, rows, settlement, quality, manifests, receipts, releases, and certification are excluded. The 15m canary must retrieve and bind new per-market evidence."
 }
