@@ -1,0 +1,12 @@
+{
+  "schema_version":"1.0.0",
+  "assets":["DOGE","BNB","HYPE"],
+  "venue":"polymarket",
+  "timeframes":{"included":["5m"],"excluded":["15m"]},
+  "release_start":"2026-04-05T00:00:00Z",
+  "tier_a_start":"2026-04-13T19:00:00Z",
+  "end_policy":"finite_release_cutoff_must_be_resolved_and_declared_in_manifest",
+  "partition":"asset/timeframe/utc_date",
+  "sample_interval_ms":200,
+  "unknown_policy":"exclude_fail_closed"
+}

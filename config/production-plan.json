@@ -1,0 +1,12 @@
+{
+  "schema_version":"1.0.0",
+  "release_start":"2026-04-05",
+  "release_cutoff":"2026-08-07T15:00:00Z",
+  "partition":{"unit":"asset/timeframe/utc_date","assets":["DOGE","BNB","HYPE"],"timeframe":"5m","count":375},
+  "execution":{"unit":"same_utc_day_unfinished_assets","source_reuse":"one PMXT acquisition and parse shared by all unfinished assets","concurrency":1,"retry_attempts":3,"retry_delays_seconds":[2,8,32],"retry_only_transient_http":true},
+  "limits":{"source_object_bytes":800000000,"pmxt_scanned_rows_per_object":25000000,"pmxt_filtered_rows_per_object":500000,"pmxt_rows_per_partition":3000000,"kacho_rows_per_partition":100000,"derived_rows_per_partition":1000000,"transformed_partition_bytes":1000000000,"minimum_available_memory_bytes":2000000000,"minimum_free_disk_bytes":8000000000},
+  "publication":{"grouping":"calendar_month","groups":5,"maximum_partitions_per_group":93,"assets_per_partition":6,"maximum_assets_including_index_notice":560,"asset_bytes":1900000000,"draft_first":true},
+  "retention":{"native_events":true,"temporary_raw":"delete_only_after_verified_remote_retrieval","official_payload_cache":"retain_until_partition_publication"},
+  "quality":{"tier_a_start":"2026-04-13T19:00:00Z","tier_b_end":"2026-05-18T23:59:59.999999999Z","pmxt_inconsistency":"use_matching_kacho_as_TIER_B_or_EXCLUDE","inferred_settlement":false},
+  "projection":{"pmxt_objects":2782,"pmxt_event_rows":700000000,"input_transfer_bytes_range":[900000000000,1500000000000],"canonical_output_bytes_range":[12000000000,20000000000],"wall_hours_range":[55,110],"core_hours_range":[90,180],"monthly_allowance_resets_required_range":[1,2]}
+}
