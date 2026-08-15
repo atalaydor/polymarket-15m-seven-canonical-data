@@ -182,9 +182,67 @@ class PmxtTests(unittest.TestCase):
             )
             self.assertEqual(len(downloaded.events), 1)
             self.assertEqual(
-                downloaded.provenance[0].transformations[0],
-                "bounded_whole_object_fallback",
+                downloaded.provenance[0].transformations,
+                (
+                    "bounded_whole_object_fallback",
+                    "condition_token_filter",
+                    "market_receive_window_filter",
+                ),
             )
+
+    def test_downloaded_reader_retains_only_causal_market_inventory(self) -> None:
+        base = pmxt_rows(False)[0]
+        before_ms = START_NS // 1_000_000 - 3_600_001
+        end_ms = market().market_end_ns // 1_000_000
+        timestamps_ms = (
+            *(before_ms - offset for offset in range(10)),
+            START_NS // 1_000_000 - 3_600_000,
+            START_NS // 1_000_000,
+            *(end_ms + offset for offset in range(10)),
+        )
+        rows = []
+        for timestamp_ms in timestamps_ms:
+            row = {key: base.get(key) for key in PMXT_COLUMNS}
+            row["timestamp_received"] = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+            row["timestamp"] = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+            row["market"] = CONDITION.encode()
+            if timestamp_ms < START_NS // 1_000_000 - 3_600_000 or timestamp_ms >= end_ms:
+                row["event_type"] = "malformed_outside_inventory"
+            rows.append(row)
+        schema = pa.schema(
+            [
+                ("timestamp_received", pa.timestamp("ms", tz="UTC")),
+                ("timestamp", pa.timestamp("ms", tz="UTC")),
+                ("market", pa.binary(66)),
+                ("event_type", pa.string()),
+                ("asset_id", pa.string()),
+                ("bids", pa.string()),
+                ("asks", pa.string()),
+                ("price", pa.decimal128(9, 4)),
+                ("size", pa.decimal128(18, 6)),
+                ("side", pa.string()),
+                ("best_bid", pa.decimal128(9, 4)),
+                ("best_ask", pa.decimal128(9, 4)),
+                ("fee_rate_bps", pa.uint16()),
+                ("transaction_hash", pa.string()),
+                ("old_tick_size", pa.decimal128(9, 4)),
+                ("new_tick_size", pa.decimal128(9, 4)),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "pmxt.parquet"
+            pq.write_table(pa.Table.from_pylist(rows, schema=schema), path)
+            loaded = ProductionSourceLoader(GammaClient(), 7).load_downloaded_pmxt(
+                path,
+                "https://example.test/hour.parquet",
+                (market(),),
+                '"etag"',
+                max_filtered_rows=2,
+            )
+        self.assertEqual(
+            [event.receive_ts_ns for event in loaded.events],
+            [START_NS - 3_600_000_000_000, START_NS],
+        )
 
     def test_every_event_type_and_reconstruction(self) -> None:
         events = decode_rows(pmxt_rows(), "fixture.parquet")

@@ -124,6 +124,10 @@ class ProductionSourceLoader:
     ) -> PMXTLoad:
         conditions = {market.condition_id for market in markets}
         tokens = {token for market in markets for token in (market.token_up, market.token_down)}
+        receive_bounds = {
+            market.condition_id: (market.market_start_ns - 3_600_000_000_000, market.market_end_ns)
+            for market in markets
+        }
         events: list[BookEvent] = []
         provenance: list[Provenance] = []
         for url in sorted(set(urls)):
@@ -136,6 +140,7 @@ class ProductionSourceLoader:
                     url,
                     max_scanned_rows_per_object,
                     max_filtered_rows_per_object,
+                    receive_bounds,
                 )
             finally:
                 reader.close()
@@ -154,7 +159,11 @@ class ProductionSourceLoader:
                     license_id="CC-BY-4.0",
                     source_precision="ms",
                     etag=identity.etag,
-                    transformations=("conditional_range_read", "condition_token_filter"),
+                    transformations=(
+                        "conditional_range_read",
+                        "condition_token_filter",
+                        "market_receive_window_filter",
+                    ),
                 )
             )
         return PMXTLoad(tuple(events), tuple(provenance))
@@ -166,11 +175,16 @@ class ProductionSourceLoader:
         markets: tuple[Market, ...],
         etag: str | None,
         max_filtered_rows: int = 500_000,
+        verified_identity: tuple[int, str] | None = None,
     ) -> PMXTLoad:
         """Filter one bounded whole-object fallback without retaining the raw archive."""
         conditions = {market.condition_id for market in markets}
         tokens = {token for market in markets for token in (market.token_up, market.token_down)}
-        length, digest = hash_file(path)
+        receive_bounds = {
+            market.condition_id: (market.market_start_ns - 3_600_000_000_000, market.market_end_ns)
+            for market in markets
+        }
+        length, digest = verified_identity if verified_identity is not None else hash_file(path)
         events = read_pmxt_parquet(
             path,
             conditions,
@@ -178,6 +192,7 @@ class ProductionSourceLoader:
             source_url,
             max_scanned_rows=2_000_000_000,
             max_output_rows=max_filtered_rows,
+            receive_bounds_by_condition=receive_bounds,
         )
         provenance = Provenance(
             source_id="pmxt_v2",
@@ -188,6 +203,10 @@ class ProductionSourceLoader:
             license_id="CC-BY-4.0",
             source_precision="ms",
             etag=etag,
-            transformations=("bounded_whole_object_fallback", "condition_token_filter"),
+            transformations=(
+                "bounded_whole_object_fallback",
+                "condition_token_filter",
+                "market_receive_window_filter",
+            ),
         )
         return PMXTLoad(tuple(events), (provenance,))

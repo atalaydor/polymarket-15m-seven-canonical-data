@@ -3,8 +3,8 @@
 ```text
 remote production Releases -> unfinished asset/day plan
 UTC day -> official discovery for unfinished assets
-        -> acquire and parse each PMXT hourly object once
-        -> filter into one shared condition-indexed spool
+        -> acquire each PMXT hourly object once
+        -> sequentially filter exact asset identities into one shared condition-indexed spool
         -> build, verify, publish, and redownload each asset partition independently
         -> reconcile remote authority -> durable ledger checkpoint -> next day
 ```
@@ -18,6 +18,12 @@ after any file or partition publication is restart-safe.
 Execution is sequential (`max-parallel: 1`), transient retries are bounded, source and transformed
 objects are capped, and each job has a six-hour limit. Temporary source bytes are deleted after the
 shared spool or verified publication no longer needs them.
+
+PMXT filtering retains only exact official condition/token rows whose receive time is in the
+market's one-hour causal warm-up through its 15-minute end. Each acquired object is then filtered
+one asset at a time into the shared spool, so source transfer is still shared without multiplying
+the in-memory event set by seven. The capacity circuit breakers are derived in
+`config/pmxt-capacity-evidence.json`; they are resource guards, not quality or exclusion rules.
 
 Content-addressed assets are grouped in half-month Releases. A bucket contains at most 16 UTC days,
 112 partitions, and 672 assets; Release-list and asset-list pagination are both finite and bounded.

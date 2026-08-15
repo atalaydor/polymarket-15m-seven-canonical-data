@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0.0",
+  "accessed_at": "2026-08-16",
+  "classification": "measurable_capacity_constraint_and_runaway_circuit_breaker",
+  "evidence": {
+    "measured_canary_run": {
+      "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31902521041",
+      "candidate_start": 1786318200,
+      "source_objects": 2,
+      "source_bytes": 1064368347,
+      "peak_rss_kib": 2925148,
+      "rows_by_asset": {
+        "BTC": 324090,
+        "ETH": 169655,
+        "SOL": 145165,
+        "XRP": 92756,
+        "DOGE": 86659,
+        "BNB": 58867,
+        "HYPE": 21247
+      }
+    },
+    "failed_multi_window_run": {
+      "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31910544833",
+      "qualified_candidates": 8,
+      "old_per_asset_object_cap": 500000,
+      "proven_lower_bound": 500001,
+      "exact_count_recoverable": false,
+      "reason": "the inherited guard raised on the first excess row without asset or count diagnostics"
+    },
+    "runner_capacity": {
+      "url": "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+      "label": "ubuntu-24.04 public repository",
+      "cpu": 4,
+      "memory_bytes": 16000000000,
+      "ssd_bytes": 14000000000,
+      "job_timeout_seconds": 21600
+    }
+  },
+  "derivation": {
+    "measured_max_rows_per_market": 324090,
+    "safety_margin_numerator": 5,
+    "safety_margin_denominator": 4,
+    "max_rows_per_market": 405113,
+    "warmup_seconds": 3600,
+    "market_seconds": 900,
+    "market_step_seconds": 900,
+    "max_relevant_markets_per_hourly_object": 8,
+    "max_rows_per_asset_object": 3240904,
+    "max_markets_per_asset_day": 96,
+    "max_rows_per_asset_day_partition": 38890848
+  }
+}

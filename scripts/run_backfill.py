@@ -41,8 +41,19 @@ REPOSITORY = "atalaydor/polymarket-15m-seven-canonical-data"
 DATASET_RELEASE_PREFIX = "polymarket-15m-seven-v1"
 RETRY_DELAYS = (2, 8, 32)
 TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
-PMXT_FILTERED_ROWS_PER_ASSET_OBJECT = 500_000
+# Run 31902521041 measured 324,090 native rows for the busiest (BTC) market
+# across its complete two-object reconstruction inventory. A 25% margin covers
+# expected market variance; the interval geometry bounds one hourly object to
+# eight 15m markets when one hour of causal warm-up is retained.
+PMXT_MEASURED_ROWS_PER_MARKET = 324_090
+PMXT_ROWS_PER_MARKET_WITH_MARGIN = (PMXT_MEASURED_ROWS_PER_MARKET * 5 + 3) // 4
+PMXT_MARKETS_PER_ASSET_OBJECT = 8
+PMXT_FILTERED_ROWS_PER_ASSET_OBJECT = (
+    PMXT_ROWS_PER_MARKET_WITH_MARGIN * PMXT_MARKETS_PER_ASSET_OBJECT
+)
+PMXT_FILTERED_ROWS_PER_ASSET_DAY = PMXT_ROWS_PER_MARKET_WITH_MARGIN * 96
 MAX_SOURCE_OBJECT_BYTES = 800_000_000
+MINIMUM_FREE_DISK_BYTES = 8_000_000_000
 
 # These immutable hourly objects span every Polymarket condition; their identities
 # and observed absence are timeframe-neutral. The canary records fresh access.
@@ -64,21 +75,95 @@ def _peak_rss_kib() -> int:
 
 
 def enforce_shared_pmxt_asset_caps(
-    events: tuple[BookEvent, ...], markets_by_asset: Mapping[Asset, tuple[Market, ...]]
-) -> None:
+    events: tuple[BookEvent, ...],
+    markets_by_asset: Mapping[Asset, tuple[Market, ...]],
+    day_market_counts: dict[str, int] | None = None,
+    day_asset_counts: dict[Asset, int] | None = None,
+) -> dict[Asset, int]:
     owner = {
         market.condition_id: asset
         for asset, markets in markets_by_asset.items()
         for market in markets
     }
     counts = {asset: 0 for asset in markets_by_asset}
+    market_counts: dict[str, int] = {}
     for event in events:
         asset = owner.get(event.condition_id)
         if asset is None:
             raise SourceError("shared PMXT event is outside the bound market inventory")
         counts[asset] += 1
+        market_counts[event.condition_id] = market_counts.get(event.condition_id, 0) + 1
         if counts[asset] > PMXT_FILTERED_ROWS_PER_ASSET_OBJECT:
-            raise ResourceLimitError("PMXT filtered output exceeds per-asset row cap")
+            raise ResourceLimitError(
+                f"PMXT filtered output for {asset.value} exceeds per-object asset cap "
+                f"({counts[asset]} > {PMXT_FILTERED_ROWS_PER_ASSET_OBJECT})"
+            )
+        if market_counts[event.condition_id] > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
+            raise ResourceLimitError(
+                "PMXT filtered output exceeds measured per-market capacity bound"
+            )
+        if day_market_counts is not None:
+            day_market_counts[event.condition_id] = (
+                day_market_counts.get(event.condition_id, 0) + 1
+            )
+            if day_market_counts[event.condition_id] > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
+                raise ResourceLimitError(
+                    "PMXT filtered output exceeds measured per-market daily capacity bound"
+                )
+        if day_asset_counts is not None:
+            day_asset_counts[asset] = day_asset_counts.get(asset, 0) + 1
+            if day_asset_counts[asset] > PMXT_FILTERED_ROWS_PER_ASSET_DAY:
+                raise ResourceLimitError(
+                    f"PMXT filtered output for {asset.value} exceeds per-day asset cap"
+                )
+    return counts
+
+
+def _pmxt_source_window_ns(source: SourceObject) -> tuple[int, int]:
+    stamp = source.url.rsplit("_", 1)[-1].removesuffix(".parquet")
+    try:
+        start = datetime.strptime(stamp, "%Y-%m-%dT%H").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise SourceError("PMXT source URL lacks an authoritative hourly identity") from exc
+    start_ns = int(start.timestamp()) * 1_000_000_000
+    return start_ns, start_ns + 3_600_000_000_000
+
+
+def _markets_relevant_to_source(
+    markets: tuple[Market, ...], source: SourceObject
+) -> tuple[Market, ...]:
+    source_start_ns, source_end_ns = _pmxt_source_window_ns(source)
+    relevant = tuple(
+        market
+        for market in markets
+        if market.market_end_ns > source_start_ns
+        and market.market_start_ns - 3_600_000_000_000 < source_end_ns
+    )
+    if len(relevant) > PMXT_MARKETS_PER_ASSET_OBJECT:
+        raise ResourceLimitError("PMXT object intersects too many 15m market inventories")
+    return relevant
+
+
+def _restore_shared_pmxt_counts(
+    spool: EventSpool, markets_by_asset: Mapping[Asset, tuple[Market, ...]]
+) -> tuple[dict[str, int], dict[Asset, int]]:
+    owner = {
+        market.condition_id: asset
+        for asset, markets in markets_by_asset.items()
+        for market in markets
+    }
+    market_counts = spool.counts_by_condition()
+    asset_counts = {asset: 0 for asset in markets_by_asset}
+    for condition_id, count in market_counts.items():
+        asset = owner.get(condition_id)
+        if asset is None:
+            raise SourceError("shared PMXT spool contains an event outside market inventory")
+        if count > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
+            raise ResourceLimitError("resumed PMXT market exceeds daily capacity bound")
+        asset_counts[asset] += count
+    if any(count > PMXT_FILTERED_ROWS_PER_ASSET_DAY for count in asset_counts.values()):
+        raise ResourceLimitError("resumed PMXT asset exceeds daily capacity bound")
+    return market_counts, asset_counts
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -262,6 +347,10 @@ def prepare_shared_day(
     ):
         raise SourceError("qualified PMXT objects do not match the execution source set")
     with EventSpool(spool_path, create_index=False) as spool:
+        spool.discard_uncommitted_sources(set(state["completed_urls"]))
+        day_market_counts, day_asset_counts = _restore_shared_pmxt_counts(
+            spool, markets_by_asset
+        )
         spool.drop_index()
         for source in source_objects:
             if source.url in state["completed_urls"]:
@@ -277,21 +366,44 @@ def prepare_shared_day(
                 acquired.etag,
                 expected_source_identities,
             )
-            loaded = loaders[assets[0]].load_downloaded_pmxt(
-                acquired.path,
-                source.url,
-                combined_markets,
-                acquired.etag,
-                max_filtered_rows=PMXT_FILTERED_ROWS_PER_ASSET_OBJECT * len(assets),
-            )
-            enforce_shared_pmxt_asset_caps(loaded.events, markets_by_asset)
-            spool.append(loaded.events)
+            object_provenance: dict[str, dict[str, Any]] = {}
+            for asset in assets:
+                relevant_markets = _markets_relevant_to_source(markets_by_asset[asset], source)
+                if not relevant_markets:
+                    continue
+                try:
+                    loaded = loaders[asset].load_downloaded_pmxt(
+                        acquired.path,
+                        source.url,
+                        relevant_markets,
+                        acquired.etag,
+                        max_filtered_rows=PMXT_FILTERED_ROWS_PER_ASSET_OBJECT,
+                        verified_identity=(acquired.byte_length, acquired.sha256),
+                    )
+                except ResourceLimitError as exc:
+                    raise ResourceLimitError(
+                        f"{asset.value} capacity failure while filtering {source.url}: {exc}"
+                    ) from exc
+                enforce_shared_pmxt_asset_caps(
+                    loaded.events,
+                    {asset: relevant_markets},
+                    day_market_counts,
+                    day_asset_counts,
+                )
+                spool.append(loaded.events)
+                object_provenance[asset.value] = asdict(loaded.provenance[0])
+            if not object_provenance:
+                raise SourceError("PMXT source object has no relevant authoritative market")
+            shared_provenance = next(iter(object_provenance.values()))
             state["completed_urls"][source.url] = {
-                asset.value: asdict(loaded.provenance[0]) for asset in assets
+                asset.value: object_provenance.get(asset.value, shared_provenance)
+                for asset in assets
             }
             state["source_bytes"] = int(state["source_bytes"]) + acquired.byte_length
             _atomic_json(state_path, state)
             acquired.path.unlink(missing_ok=True)
+            if shutil.disk_usage(shared).free < MINIMUM_FREE_DISK_BYTES:
+                raise ResourceLimitError("shared PMXT spool exhausted disk safety margin")
         spool.ensure_index()
 
     gap_provenance = tuple(

@@ -3,13 +3,15 @@
   "dataset_id": "polymarket-15m-seven-v1",
   "resource_limits": {
     "max_markets_per_partition": 96,
-    "max_pmxt_rows_per_partition": 3000000,
+    "max_pmxt_rows_per_partition": 38890848,
     "max_derived_samples_per_partition": 4000000,
     "max_underlying_rows_per_partition": 0,
     "max_transformed_partition_bytes": 1000000000,
     "max_source_object_bytes": 800000000,
     "max_pmxt_scanned_rows_per_object": 25000000,
-    "max_pmxt_filtered_rows_per_object_per_asset": 500000,
+    "max_pmxt_filtered_rows_per_market": 405113,
+    "max_pmxt_filtered_rows_per_object_per_asset": 3240904,
+    "max_pmxt_filtered_rows_per_day_per_asset": 38890848,
     "max_release_asset_bytes": 1900000000,
     "minimum_free_disk_bytes": 8000000000,
     "minimum_available_memory_bytes": 2000000000

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -57,6 +57,7 @@ def read_pmxt_parquet(
     source_object: str,
     max_scanned_rows: int = 25_000_000,
     max_output_rows: int = 500_000,
+    receive_bounds_by_condition: Mapping[str, tuple[int, int]] | None = None,
 ) -> list[BookEvent]:
     if not condition_ids or not token_ids:
         return []
@@ -89,9 +90,44 @@ def read_pmxt_parquet(
             table = parquet.read_row_group(index, columns=PMXT_COLUMNS)
             table = table.filter(pc.is_in(table["market"], value_set=market_values))
             table = table.filter(pc.is_in(table["asset_id"], value_set=token_values))
+            if receive_bounds_by_condition is not None and table.num_rows:
+                if table["timestamp_received"].null_count:
+                    raise SourceError("PMXT receive timestamp is required")
+                received_ms = pc.cast(table["timestamp_received"], pa.int64())
+                window_mask: pa.Array | pa.ChunkedArray | None = None
+                for condition_id, (lower_ns, upper_ns) in receive_bounds_by_condition.items():
+                    lower_ms = (lower_ns + 999_999) // 1_000_000
+                    upper_ms = (upper_ns + 999_999) // 1_000_000
+                    condition_mask = pc.equal(
+                        table["market"],
+                        pa.scalar(condition_id.encode("ascii"), type=table["market"].type),
+                    )
+                    time_mask = pc.and_(
+                        pc.greater_equal(received_ms, lower_ms),
+                        pc.less(received_ms, upper_ms),
+                    )
+                    bounded = pc.and_(condition_mask, time_mask)
+                    window_mask = bounded if window_mask is None else pc.or_(window_mask, bounded)
+                table = table.slice(0, 0) if window_mask is None else table.filter(window_mask)
             if len(events) + table.num_rows > max_output_rows:
-                raise ResourceLimitError("PMXT filtered output exceeds row cap")
-            events.extend(decode_rows(table.to_pylist(), source_object, row_offset))
+                raise ResourceLimitError(
+                    "PMXT filtered output exceeds row cap "
+                    f"({len(events) + table.num_rows} > {max_output_rows})"
+                )
+            decoded = decode_rows(table.to_pylist(), source_object, row_offset)
+            if receive_bounds_by_condition is not None:
+                decoded = [
+                    event
+                    for event in decoded
+                    if (
+                        event.condition_id in receive_bounds_by_condition
+                        and event.receive_ts_ns is not None
+                        and receive_bounds_by_condition[event.condition_id][0]
+                        <= event.receive_ts_ns
+                        < receive_bounds_by_condition[event.condition_id][1]
+                    )
+                ]
+            events.extend(decoded)
             row_offset += parquet.metadata.row_group(index).num_rows
         return order_and_deduplicate(events)
     finally:

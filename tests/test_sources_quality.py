@@ -7,7 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -37,7 +37,16 @@ from canonical_data.planner import build_backfill_plan
 from canonical_data.quality import classify
 from canonical_data.rangeio import BoundedRangeReader
 from canonical_data.sources import ProductionSourceLoader
-from scripts.run_backfill import enforce_shared_pmxt_asset_caps
+from canonical_data.spool import EventSpool
+from scripts.run_backfill import (
+    PMXT_FILTERED_ROWS_PER_ASSET_DAY,
+    PMXT_FILTERED_ROWS_PER_ASSET_OBJECT,
+    PMXT_MARKETS_PER_ASSET_OBJECT,
+    PMXT_ROWS_PER_MARKET_WITH_MARGIN,
+    _markets_relevant_to_source,
+    _restore_shared_pmxt_counts,
+    enforce_shared_pmxt_asset_caps,
+)
 
 
 class InventoryAndAcquisitionTests(unittest.TestCase):
@@ -70,6 +79,147 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                 enforce_shared_pmxt_asset_caps(
                     (*accepted, event(doge.condition_id, 4)), inventories
                 )
+
+    def test_pmxt_capacity_is_measured_and_cumulative_without_shared_multiplication(self) -> None:
+        self.assertEqual(PMXT_ROWS_PER_MARKET_WITH_MARGIN, 405_113)
+        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_OBJECT, 3_240_904)
+        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_DAY, 38_890_848)
+        configured = json.loads(Path("config/pipeline.json").read_bytes())["resource_limits"]
+        self.assertEqual(configured["max_pmxt_filtered_rows_per_market"], 405_113)
+        self.assertEqual(
+            configured["max_pmxt_filtered_rows_per_object_per_asset"], 3_240_904
+        )
+        self.assertEqual(
+            configured["max_pmxt_filtered_rows_per_day_per_asset"], 38_890_848
+        )
+        self.assertEqual(configured["max_pmxt_rows_per_partition"], 38_890_848)
+        doge = market(Asset.DOGE)
+        event = BookEvent(
+            condition_id=doge.condition_id,
+            token_id="1",
+            source_ts_ns=START_NS,
+            receive_ts_ns=START_NS,
+            source_object="fixture",
+            source_row=0,
+            sequence=0,
+            event_type=EventType.PRICE_CHANGE,
+        )
+        day_markets: dict[str, int] = {}
+        day_assets = {Asset.DOGE: 0}
+        limits = (
+            mock.patch("scripts.run_backfill.PMXT_ROWS_PER_MARKET_WITH_MARGIN", 2),
+            mock.patch("scripts.run_backfill.PMXT_FILTERED_ROWS_PER_ASSET_OBJECT", 4),
+            mock.patch("scripts.run_backfill.PMXT_FILTERED_ROWS_PER_ASSET_DAY", 4),
+        )
+        with limits[0], limits[1], limits[2]:
+            enforce_shared_pmxt_asset_caps(
+                (event,), {Asset.DOGE: (doge,)}, day_markets, day_assets
+            )
+            enforce_shared_pmxt_asset_caps(
+                (event,), {Asset.DOGE: (doge,)}, day_markets, day_assets
+            )
+            self.assertEqual(day_assets, {Asset.DOGE: 2})
+            with self.assertRaises(ResourceLimitError):
+                enforce_shared_pmxt_asset_caps(
+                    (event,), {Asset.DOGE: (doge,)}, day_markets, day_assets
+                )
+
+    def test_hourly_source_intersects_at_most_eight_warm_market_windows(self) -> None:
+        hour = datetime.fromtimestamp(START_NS / 1_000_000_000, UTC).replace(
+            minute=0, second=0, microsecond=0
+        )
+        hour_ns = int(hour.timestamp()) * 1_000_000_000
+        markets = tuple(
+            replace(
+                market(Asset.BTC),
+                condition_id=f"0x{index:064x}",
+                market_start_ns=hour_ns + index * 900_000_000_000,
+                market_end_ns=hour_ns + (index + 1) * 900_000_000_000,
+            )
+            for index in range(-4, 12)
+        )
+        source = SourceObject(
+            "pmxt_v2",
+            f"https://r2v2.pmxt.dev/polymarket_orderbook_{hour:%Y-%m-%dT%H}.parquet",
+        )
+        relevant = _markets_relevant_to_source(markets, source)
+        self.assertEqual(len(relevant), PMXT_MARKETS_PER_ASSET_OBJECT)
+        self.assertEqual(
+            [item.market_start_ns for item in relevant],
+            [hour_ns + index * 900_000_000_000 for index in range(8)],
+        )
+
+    def test_resumed_spool_restores_cumulative_asset_and_market_counts(self) -> None:
+        doge = market(Asset.DOGE)
+        bnb = replace(market(Asset.BNB), condition_id="0x" + "b" * 64)
+
+        def event(condition_id: str, source_row: int) -> BookEvent:
+            return BookEvent(
+                condition_id=condition_id,
+                token_id="1",
+                source_ts_ns=START_NS,
+                receive_ts_ns=START_NS,
+                source_object="fixture",
+                source_row=source_row,
+                sequence=0,
+                event_type=EventType.PRICE_CHANGE,
+            )
+
+        inventories = {Asset.DOGE: (doge,), Asset.BNB: (bnb,)}
+        with tempfile.TemporaryDirectory() as temp:
+            spool_path = Path(temp) / "events.sqlite"
+            with EventSpool(spool_path) as spool:
+                spool.append(
+                    (
+                        event(doge.condition_id, 0),
+                        event(doge.condition_id, 1),
+                        event(bnb.condition_id, 2),
+                    )
+                )
+            with EventSpool(spool_path) as resumed:
+                with (
+                    mock.patch("scripts.run_backfill.PMXT_ROWS_PER_MARKET_WITH_MARGIN", 2),
+                    mock.patch("scripts.run_backfill.PMXT_FILTERED_ROWS_PER_ASSET_DAY", 3),
+                ):
+                    market_counts, asset_counts = _restore_shared_pmxt_counts(
+                        resumed, inventories
+                    )
+                    self.assertEqual(asset_counts, {Asset.DOGE: 2, Asset.BNB: 1})
+                    with self.assertRaises(ResourceLimitError):
+                        enforce_shared_pmxt_asset_caps(
+                            (event(doge.condition_id, 3),),
+                            {Asset.DOGE: (doge,)},
+                            market_counts,
+                            asset_counts,
+                        )
+
+    def test_partial_source_rows_are_discarded_before_resume_accounting(self) -> None:
+        doge = market(Asset.DOGE)
+
+        def event(source_object: str, source_row: int) -> BookEvent:
+            return BookEvent(
+                condition_id=doge.condition_id,
+                token_id="1",
+                source_ts_ns=START_NS,
+                receive_ts_ns=START_NS,
+                source_object=source_object,
+                source_row=source_row,
+                sequence=0,
+                event_type=EventType.PRICE_CHANGE,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            spool_path = Path(temp) / "events.sqlite"
+            with EventSpool(spool_path) as spool:
+                spool.append((event("committed", 0),))
+                spool.append((event("partial", 1), event("partial", 2)))
+            with EventSpool(spool_path) as resumed:
+                self.assertEqual(resumed.discard_uncommitted_sources({"committed"}), 2)
+                market_counts, asset_counts = _restore_shared_pmxt_counts(
+                    resumed, {Asset.DOGE: (doge,)}
+                )
+                self.assertEqual(market_counts, {doge.condition_id: 1})
+                self.assertEqual(asset_counts, {Asset.DOGE: 1})
 
     def test_15m_inventory_is_exact_at_full_and_partial_days(self) -> None:
         coverage_start = PMXT_VALIDATION_COVERAGE_START

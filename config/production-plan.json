@@ -11,7 +11,7 @@
   },
   "execution": {
     "unit": "same_utc_day_unfinished_assets",
-    "source_reuse": "one PMXT acquisition and parse shared by all unfinished assets",
+    "source_reuse": "one PMXT acquisition with sequential exact-asset filtering into one shared spool",
     "concurrency": 1,
     "retry_attempts": 3,
     "retry_delays_seconds": [2, 8, 32],

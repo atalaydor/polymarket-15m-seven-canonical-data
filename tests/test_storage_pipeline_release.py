@@ -384,7 +384,7 @@ class PipelineTests(unittest.TestCase):
             self.assertNotEqual(exclusions[0]["evidence_json"], "{}")
 
     def test_partition_resource_caps_fail_before_work(self) -> None:
-        self.assertEqual(PipelineLimits().max_pmxt_rows, 3_000_000)
+        self.assertEqual(PipelineLimits().max_pmxt_rows, 38_890_848)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             limits = PipelineLimits(max_markets=0)
