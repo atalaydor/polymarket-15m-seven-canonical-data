@@ -298,6 +298,32 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(exclusions[0]["reason_code"], "NO_INITIAL_SNAPSHOT")
             self.assertIn("condition_id", exclusions[0]["evidence_json"])
 
+    def test_missing_claimed_bbo_level_is_event_conflict_not_synthetic_depth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            conflict = {
+                **pmxt_rows()[2],
+                "best_ask": "0.55",
+            }
+            built = Pipeline(root / "out", StateStore(root / "state"), COMMIT).build(
+                PartitionInputs(
+                    Asset.DOGE,
+                    "2026-04-13",
+                    (market(),),
+                    tuple([*pmxt_rows(False), conflict]),
+                    "fixture",
+                    provenance=(provenance(),),
+                ),
+                market().market_end_ns,
+            )
+            self.assertEqual(built.tier, QualityTier.EXCLUDED)
+            exclusions = pq.read_table(built.directory / "exclusions.parquet").to_pylist()
+            self.assertEqual(exclusions[0]["reason_code"], "EVENT_CONFLICT")
+            self.assertIn(
+                "best ask disagrees: reconstructed=0.60, claimed=0.55",
+                exclusions[0]["detail"],
+            )
+
     def test_pre_snapshot_increment_does_not_poison_later_full_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
