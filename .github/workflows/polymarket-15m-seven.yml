@@ -39,7 +39,7 @@ jobs:
       - name: Execute and reverify one isolated seven-asset canary
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/actions_backend.py canary
+        run: python -m scripts.actions_backend canary
       - name: Commit the canary authority receipt
         run: |
           test -f config/canary-receipt.json
@@ -64,7 +64,7 @@ jobs:
         name: Derive unfinished UTC days from remote authority
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/actions_backend.py plan
+        run: python -m scripts.actions_backend plan
 
   backfill-day:
     if: ${{ inputs.mode == 'full-backfill' && needs.plan.outputs.matrix != '{"include":[]}' }}
@@ -84,7 +84,7 @@ jobs:
       - name: Execute unfinished assets with one shared daily source pass
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/actions_backend.py execute-day --day "${{ matrix.day }}"
+        run: python -m scripts.actions_backend execute-day --day "${{ matrix.day }}"
       - name: Serialize the aggregate remote-authority checkpoint
         run: |
           if git diff --quiet -- config/backfill-ledger.json; then exit 0; fi

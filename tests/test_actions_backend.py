@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -97,6 +99,28 @@ class ActionsBackendTests(unittest.TestCase):
             ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"],
         )
         self.assertEqual(len(_candidate_starts(authority)), 48)
+
+    def test_production_entrypoints_use_import_safe_module_execution(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflows = sorted((root / ".github/workflows").glob("*.y*ml"))
+        sources = sorted((root / "scripts").glob("*.py"))
+        for path in workflows:
+            self.assertNotIn("python scripts/", path.read_text(), str(path))
+        direct_script = re.compile(r'["\']scripts[/\\][^"\']+\.py["\']')
+        for path in sources:
+            self.assertNotRegex(path.read_text(), direct_script, str(path))
+        workflow = (root / ".github/workflows/polymarket-15m-seven.yml").read_text()
+        for command in ("canary", "plan", "execute-day"):
+            self.assertIn(f"python -m scripts.actions_backend {command}", workflow)
+        for module in ("scripts.actions_backend", "scripts.run_backfill"):
+            completed = subprocess.run(
+                [sys.executable, "-m", module, "--help"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_github_request_retries_tls_transport_failure(self) -> None:
         tls_failure = urllib.error.URLError("certificate verify failed")

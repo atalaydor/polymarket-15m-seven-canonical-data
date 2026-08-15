@@ -477,7 +477,8 @@ def command_execute_day(day_text: str) -> None:
         completed = subprocess.run(
             [
                 sys.executable,
-                "scripts/run_backfill.py",
+                "-m",
+                "scripts.run_backfill",
                 "--work-root",
                 str(root / "work"),
                 "--ledger",
@@ -573,7 +574,8 @@ def command_canary() -> None:
             completed = subprocess.run(
                 [
                     sys.executable,
-                    "scripts/run_backfill.py",
+                    "-m",
+                    "scripts.run_backfill",
                     "--work-root",
                     str(root / "work"),
                     "--ledger",
