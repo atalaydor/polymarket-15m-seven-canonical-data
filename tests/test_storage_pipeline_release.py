@@ -323,6 +323,8 @@ class PipelineTests(unittest.TestCase):
                 "best ask disagrees: reconstructed=0.60, claimed=0.55",
                 exclusions[0]["detail"],
             )
+            self.assertIn("receive_ts_ns=", exclusions[0]["detail"])
+            self.assertIn("source_row=", exclusions[0]["detail"])
 
     def test_pre_snapshot_increment_does_not_poison_later_full_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -381,7 +383,16 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(built.tier, QualityTier.EXCLUDED)
             exclusions = pq.read_table(built.directory / "exclusions.parquet").to_pylist()
             self.assertEqual(exclusions[0]["reason_code"], "SOURCE_GAP")
-            self.assertNotEqual(exclusions[0]["evidence_json"], "{}")
+            evidence = json.loads(exclusions[0]["evidence_json"])
+            self.assertEqual(evidence["gap_count"], 2)
+            self.assertEqual(
+                evidence["gap_intervals_ns"],
+                [
+                    [market().market_start_ns, market().market_start_ns + 1_000_000_000],
+                    [market().market_start_ns, market().market_start_ns + 1_000_000_000],
+                ],
+            )
+            self.assertEqual(evidence["gap_total_ns"], 2_000_000_000)
 
     def test_partition_resource_caps_fail_before_work(self) -> None:
         self.assertEqual(PipelineLimits().max_pmxt_rows, 38_890_848)

@@ -3,15 +3,16 @@
 The workflow exposes only `canary` and `full-backfill` dispatch modes. Do not dispatch full backfill
 until the canary has committed `config/canary-receipt.json`; the planner also enforces this lock.
 
-The canary asks official Gamma about eight starts from 2026-08-09T23:45Z through 22:00Z. Only after
-a complete resolved seven-asset identity/rules/outcome binding does it HEAD the required PMXT
-objects. The search is capped at 56 Gamma requests, three unique source objects, and 2.4 GB of
-source transfer. All qualified windows execute together through one shared PMXT acquisition and
-seven independently published partitions in an isolated v3 run namespace. Authenticated remote
-market rows are then searched for a common Tier A window first and otherwise an exact minimum
-multi-window cover. Exclusions remain evidence but never count as usable coverage. A second
-authenticated redownload/no-op verification records network, runtime, RSS, disk, timeout,
-settlement, exclusion-contract, and source-reuse evidence.
+The adaptive canary first revalidates BTC's digest-pinned v3 Tier A proof against fresh official
+Gamma identities and the exact remote partition. It then runs only uncovered assets through at most
+four eight-window rounds. The rounds are separated by 24 days and rotate through 18:00, 12:00,
+06:00, and 00:00 UTC phases because v3 showed that adjacent-window PMXT conflicts are highly
+correlated. Each round completes Gamma identity/rules/outcome binding and three PMXT HEAD checks
+before one shared source acquisition. An asset leaves the search after its first authenticated Tier A
+partition. The controller stops on complete coverage and computes the exact minimum cover across
+the prior and new proofs; exclusions never count. Aggregate bounds are 32 new candidates, 200 Gamma
+requests including prior-proof revalidation, 12 source objects, 9.6 GB transferred, and five hours.
+Each round publishes to its own isolated v4 namespace.
 
 Full execution is one UTC day per job. Before doing work, the executor reconciles production Release
 assets, rejects anomalies, and selects only unfinished assets. Each successful asset publication is

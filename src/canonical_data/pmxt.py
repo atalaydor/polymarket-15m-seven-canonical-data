@@ -313,6 +313,11 @@ class BookReconstructor:
         tick_size: Decimal | None = None
         states: list[BookState] = []
         for event_index, event in enumerate(events):
+            event_context = (
+                f"receive_ts_ns={event.receive_ts_ns}, source_ts_ns={event.source_ts_ns}, "
+                f"token_id={event.token_id}, source_object={event.source_object}, "
+                f"source_row={event.source_row}"
+            )
             if event.event_type is EventType.BOOK:
                 if event.receive_ts_ns is None:
                     raise ReconstructionError("PMXT event lacks receive timestamp")
@@ -332,7 +337,9 @@ class BookReconstructor:
                 if bids is None or asks is None:
                     continue
                 if tick_size is not None and event.old_tick_size != tick_size:
-                    raise ReconstructionError("tick-size chain is inconsistent")
+                    raise ReconstructionError(
+                        f"tick-size chain is inconsistent: {event_context}"
+                    )
                 tick_size = event.new_tick_size
             elif event.event_type is EventType.LAST_TRADE_PRICE:
                 continue
@@ -363,19 +370,23 @@ class BookReconstructor:
             ask_levels = tuple(Level(price, size) for price, size in sorted(asks.items()))
             if batch_end:
                 if bid_levels and ask_levels and bid_levels[0].price >= ask_levels[0].price:
-                    raise ReconstructionError("crossed or locked book")
+                    raise ReconstructionError(f"crossed or locked book: {event_context}")
                 if event.best_bid is not None:
                     actual_bid = bid_levels[0].price if bid_levels else None
                     claimed_bid = None if event.best_bid == 0 else event.best_bid
                     if actual_bid != claimed_bid:
                         detail = f"reconstructed={actual_bid}, claimed={event.best_bid}"
-                        raise ReconstructionError(f"best bid disagrees: {detail}")
+                        raise ReconstructionError(
+                            f"best bid disagrees: {detail}; {event_context}"
+                        )
                 if event.best_ask is not None:
                     actual_ask = ask_levels[0].price if ask_levels else None
                     claimed_ask = None if event.best_ask == 1 else event.best_ask
                     if actual_ask != claimed_ask:
                         detail = f"reconstructed={actual_ask}, claimed={event.best_ask}"
-                        raise ReconstructionError(f"best ask disagrees: {detail}")
+                        raise ReconstructionError(
+                            f"best ask disagrees: {detail}; {event_context}"
+                        )
             states.append(
                 BookState(
                     condition_id=event.condition_id,

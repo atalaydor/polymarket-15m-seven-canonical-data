@@ -20,7 +20,7 @@
   },
   "publication": {
     "release_prefix": "polymarket-15m-seven-v1",
-    "canary_release_prefix": "polymarket-15m-seven-canary-v3",
+    "canary_release_prefix": "polymarket-15m-seven-canary-v4",
     "grouping": "half_month",
     "maximum_assets_per_release": 672,
     "draft_first": true,
@@ -33,17 +33,23 @@
     "unknown": "EXCLUDED with evidence"
   },
   "canary": {
-    "scope": "bounded Actions discovery preferring one common resolved usable 15m window, then an exact minimum multi-window cover",
+    "scope": "reuse authenticated per-asset proof, then execute stratified source-reused rounds only for uncovered assets until exact minimum cover",
     "search": {
-      "start": "2026-08-09T23:45:00Z",
-      "end": "2026-08-09T22:00:00Z",
-      "step_minutes": 15
+      "rounds": [
+        {"start": "2026-07-17T19:45:00Z", "end": "2026-07-17T18:00:00Z", "step_minutes": 15},
+        {"start": "2026-06-23T13:45:00Z", "end": "2026-06-23T12:00:00Z", "step_minutes": 15},
+        {"start": "2026-05-30T07:45:00Z", "end": "2026-05-30T06:00:00Z", "step_minutes": 15},
+        {"start": "2026-05-06T01:45:00Z", "end": "2026-05-06T00:00:00Z", "step_minutes": 15}
+      ]
     },
     "limits": {
-      "max_candidates": 8,
-      "max_gamma_requests": 56,
-      "max_source_objects": 3,
-      "max_source_transfer_bytes": 2400000000
+      "max_rounds": 4,
+      "max_candidates_per_round": 8,
+      "max_candidates_total": 32,
+      "max_gamma_requests_total": 200,
+      "max_source_objects_total": 12,
+      "max_source_transfer_bytes_total": 9600000000,
+      "max_wall_seconds": 18000
     },
     "full_plan_unlock": "committed config/canary-receipt.json with PASSED status"
   }

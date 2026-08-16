@@ -17,11 +17,26 @@ def classify(
     reason = (
         ExclusionReason.SOURCE_GAP if gaps or not has_pmxt else ExclusionReason.NO_INITIAL_SNAPSHOT
     )
-    return _excluded(market, reason, "PMXT fidelity cannot satisfy the frozen 15m tier")
+    evidence = None
+    if gaps:
+        evidence = {
+            "gap_count": len(gaps),
+            "gap_intervals_ns": [[start, end] for start, end in gaps],
+            "gap_total_ns": sum(end - start for start, end in gaps),
+        }
+    return _excluded(
+        market,
+        reason,
+        "PMXT fidelity cannot satisfy the frozen 15m tier",
+        evidence,
+    )
 
 
 def _excluded(
-    market: Market, reason: ExclusionReason, detail: str
+    market: Market,
+    reason: ExclusionReason,
+    detail: str,
+    extra_evidence: dict[str, object] | None = None,
 ) -> tuple[QualityTier, Exclusion]:
     return QualityTier.EXCLUDED, Exclusion(
         market.market_id,
@@ -32,5 +47,6 @@ def _excluded(
             "market_evidence_sha256": market.evidence_sha256,
             "official_outcome": market.official_outcome.value,
             "resolution_source_url": market.resolution_source_url,
+            **(extra_evidence or {}),
         },
     )

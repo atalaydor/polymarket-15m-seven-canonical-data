@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0.0",
+  "accessed_at": "2026-08-16",
+  "actions_run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31914715144",
+  "release_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/releases/tag/polymarket-15m-seven-canary-v3-31914715144-1786319100-1786312800-2026-08-a",
+  "release_tag": "polymarket-15m-seven-canary-v3-31914715144-1786319100-1786312800-2026-08-a",
+  "tool_commit": "217df25db92ad1567ee0754fa65791792b644ed4",
+  "authentication": "Each canonical manifest byte stream was downloaded through the authenticated GitHub API, matched to its Release asset SHA-256 digest, and verified as canonical JSON.",
+  "candidate_starts": [1786312800, 1786313700, 1786314600, 1786315500, 1786316400, 1786317300, 1786318200, 1786319100],
+  "manifests": {
+    "BTC": "554749b51547b769aea8a1011ca243519f56bed0d165a9185bd1f040c5450f16",
+    "ETH": "795c59e9a0a8bc54f9fcf8efc2e0c32a080382d3ea1650f9085e366e2d67e69d",
+    "SOL": "2bebaebfd2fa0480b3baba16ad2f5ec3b83a8057ba8bf2a9ba23c9398891f63e",
+    "XRP": "b99409ed7d0b1c4f1b7192dcf6f183cc34c2482a56ad239ac157711c9e232c15",
+    "DOGE": "7678a2a08ef7bef67fab45a3c2e09ce5e48c689a7536125da2c4d3ae9e346da8",
+    "BNB": "d3d3d86ebbe87a947a5412c9f264908e23221f0b4fbe0c6409e6e694a1872a1e",
+    "HYPE": "f425a165fb9ded345207c3437d559e887c86d4f75a08f530adeab0b917c04091"
+  },
+  "dispositions": {
+    "BTC": ["TIER_A", "TIER_A", "EVENT_CONFLICT best_ask 0.01/0.0090", "TIER_A", "TIER_A", "TIER_A", "EVENT_CONFLICT best_ask 0.06/0.0500", "TIER_A"],
+    "ETH": ["EVENT_CONFLICT best_ask 0.53/0.5100", "EVENT_CONFLICT best_bid 0.16/0.1700", "EVENT_CONFLICT tick-size chain inconsistent", "EVENT_CONFLICT best_ask 0.27/0.2600", "EVENT_CONFLICT best_ask 0.65/0.6300", "EVENT_CONFLICT tick-size chain inconsistent", "EVENT_CONFLICT best_ask 0.21/0.1900", "EVENT_CONFLICT best_bid 0.28/0.2900"],
+    "SOL": ["EVENT_CONFLICT best_ask 0.1700/0.1600", "EVENT_CONFLICT best_ask 0.8200/0.8100", "EVENT_CONFLICT best_ask 0.42/0.4000", "EVENT_CONFLICT best_ask 0.0260/0.0250", "EVENT_CONFLICT best_ask 0.69/0.6800", "EVENT_CONFLICT best_ask 0.78/0.7700", "EVENT_CONFLICT best_ask 0.7300/0.7200", "EVENT_CONFLICT best_bid 0.55/0.5600"],
+    "XRP": ["EVENT_CONFLICT best_ask 0.75/0.7400", "EVENT_CONFLICT best_ask 0.28/0.2700", "EVENT_CONFLICT best_ask 0.9960/0.9950", "EVENT_CONFLICT best_bid 0.96/0.9700", "EVENT_CONFLICT best_bid 0.73/0.7400", "SOURCE_GAP PMXT fidelity cannot satisfy the frozen 15m tier", "EVENT_CONFLICT best_bid 0.58/0.6000", "EVENT_CONFLICT best_bid 0.4000/0.4100"],
+    "DOGE": ["EVENT_CONFLICT best_bid 0.6/0.6100", "EVENT_CONFLICT best_bid 0.36/0.3700", "EVENT_CONFLICT best_ask 0.3200/0.3100", "EVENT_CONFLICT best_bid 0.15/0.1600", "EVENT_CONFLICT best_bid 0.6200/0.6300", "EVENT_CONFLICT best_bid 0.8400/0.8500", "EVENT_CONFLICT best_ask 0.48/0.4700", "EVENT_CONFLICT best_bid 0.32/0.3300"],
+    "BNB": ["EVENT_CONFLICT best_ask 0.99/0.9800", "EVENT_CONFLICT best_ask 0.5600/0.5500", "EVENT_CONFLICT best_bid 0.5600/0.5700", "EVENT_CONFLICT best_ask 0.6300/0.6200", "EVENT_CONFLICT best_ask 0.2900/0.2400", "EVENT_CONFLICT best_bid 0.2/0.2100", "EVENT_CONFLICT best_bid 0.6300/0.6400", "EVENT_CONFLICT best_ask 0.7800/0.7700"],
+    "HYPE": ["EVENT_CONFLICT best_bid 0.4200/0.4300", "EVENT_CONFLICT best_ask 0.5800/0.5700", "EVENT_CONFLICT best_ask 0.29/0.2800", "EVENT_CONFLICT best_ask 0.4500/0.4400", "EVENT_CONFLICT best_ask 0.4800/0.4700", "EVENT_CONFLICT best_bid 0.4300/0.4400", "EVENT_CONFLICT best_bid 0.4300/0.4400", "EVENT_CONFLICT best_ask 0.3700/0.3600"]
+  },
+  "interpretation": {
+    "event_conflict": "For each reported pair, the first value is the reconstructed native best quote and the second is PMXT's claimed best quote after its receive-time batch. Missing depth cannot be synthesized. Tick-size chain contradictions likewise fail closed.",
+    "source_gap": "The XRP 23:15 market reconstructed without an event contradiction but at least one token lacked causal state on a required 200 ms grid interval. The v3 evidence schema did not serialize the interval, so its exact timestamp cannot be recovered from the permitted lightweight evidence without replaying the PMXT source.",
+    "classification": "All 48 non-BTC exclusions are legitimate canonical outcomes: 47 EVENT_CONFLICT and one SOURCE_GAP. No implementation defect was found."
+  }
+}

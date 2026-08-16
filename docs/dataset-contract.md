@@ -15,9 +15,9 @@ file checksums, statistics, quality, and exclusions. Release assets are content-
 partition is exactly one uploaded asset for every required logical file with matching embedded
 digests. Published partitions are immutable.
 
-Actions-discovery canary partitions use `polymarket-15m-seven-canary-v3-*` Releases. One bounded
-bundle may contain several declared 15-minute windows, but the receipt accepts only authenticated
-Tier A market rows and records the exact minimum window cover for all seven assets. Earlier v1/v2
-canary Releases remain immutable isolated evidence. Production partitions use
+New Actions-discovery canary partitions use `polymarket-15m-seven-canary-v4-*` Releases. A bounded
+round may contain several declared 15-minute windows, but the receipt accepts only authenticated,
+identity-bound Tier A market rows and records the exact minimum window cover for all seven assets.
+Earlier v1/v2/v3 canary Releases remain immutable isolated evidence. Production partitions use
 `polymarket-15m-seven-v1-YYYY-MM-a|b` Releases and are the only authority considered by the full
 planner.

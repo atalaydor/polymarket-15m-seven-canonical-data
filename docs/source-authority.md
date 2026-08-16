@@ -18,7 +18,7 @@ empty hours, and pass bounded HEAD checks for their warm-up and market-hour obje
 retrieves and hashes fresh Gamma payloads before any PMXT probe, then binds the resulting condition
 and token sets plus the HEAD length/ETag through acquisition and authenticated publication. The
 earlier `config/canary-source-evidence.json` remains the historical v2 qualification record and is
-not authority for v3 candidates. A 404 for an object listed by the frozen catalog is an authority
+not authority for adaptive candidates. A 404 for an object listed by the frozen catalog is an authority
 conflict and aborts; it is not an exclusion.
 
 PMXT hourly files are bounded slices of the continuous official market-channel stream. The official
@@ -26,4 +26,5 @@ channel defines `book` as a full order-book snapshot; `price_change` and `tick_s
 incremental updates. Therefore an hourly slice may begin with unusable incremental events. That
 prefix is discarded, never applied; reconstruction starts only at the first full snapshot. No snapshot is
 `NO_INITIAL_SNAPSHOT`, a snapshot after market start produces `SOURCE_GAP`, and any inconsistency
-after the snapshot remains `EVENT_CONFLICT`.
+after the snapshot remains `EVENT_CONFLICT`. New exclusions serialize exact causal gap intervals or
+the receive/source timestamp, token, object, and row of a reconstruction contradiction.

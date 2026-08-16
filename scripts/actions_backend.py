@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from itertools import combinations
 from pathlib import Path
@@ -45,14 +45,21 @@ from scripts.run_backfill import (
 )
 
 API = f"https://api.github.com/repos/{REPOSITORY}"
-CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v3"
+CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v4"
 AUTHORITY_PATH = Path("config/production-plan.json")
+PRIOR_EVIDENCE_PATH = Path("config/canary-prior-evidence.json")
 CANARY_RECEIPT_PATH = Path("config/canary-receipt.json")
 LEDGER_PATH = Path("config/backfill-ledger.json")
 CANARY_MAX_CANDIDATES = 8
 CANARY_MAX_GAMMA_REQUESTS = CANARY_MAX_CANDIDATES * len(tuple(Asset))
 CANARY_MAX_SOURCE_OBJECTS = 3
 CANARY_MAX_SOURCE_BYTES = 2_400_000_000
+CANARY_MAX_ROUNDS = 4
+CANARY_MAX_CANDIDATES_TOTAL = CANARY_MAX_CANDIDATES * CANARY_MAX_ROUNDS
+CANARY_MAX_GAMMA_REQUESTS_TOTAL = 200
+CANARY_MAX_SOURCE_OBJECTS_TOTAL = CANARY_MAX_SOURCE_OBJECTS * CANARY_MAX_ROUNDS
+CANARY_MAX_SOURCE_BYTES_TOTAL = CANARY_MAX_SOURCE_BYTES * CANARY_MAX_ROUNDS
+CANARY_MAX_WALL_SECONDS = 18_000
 EXPECTED_FILES = {
     "book-200ms.parquet",
     "book-events.parquet",
@@ -77,6 +84,7 @@ class Authority:
     canary_search_start: datetime
     canary_search_end: datetime
     canary_step_minutes: int
+    canary_rounds: tuple[tuple[datetime, datetime, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -162,19 +170,34 @@ def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
     search = canary["search"]
     limits = canary["limits"]
     if limits != {
-        "max_candidates": CANARY_MAX_CANDIDATES,
-        "max_gamma_requests": CANARY_MAX_GAMMA_REQUESTS,
-        "max_source_objects": CANARY_MAX_SOURCE_OBJECTS,
-        "max_source_transfer_bytes": CANARY_MAX_SOURCE_BYTES,
+        "max_rounds": CANARY_MAX_ROUNDS,
+        "max_candidates_per_round": CANARY_MAX_CANDIDATES,
+        "max_candidates_total": CANARY_MAX_CANDIDATES_TOTAL,
+        "max_gamma_requests_total": CANARY_MAX_GAMMA_REQUESTS_TOTAL,
+        "max_source_objects_total": CANARY_MAX_SOURCE_OBJECTS_TOTAL,
+        "max_source_transfer_bytes_total": CANARY_MAX_SOURCE_BYTES_TOTAL,
+        "max_wall_seconds": CANARY_MAX_WALL_SECONDS,
     }:
         raise RuntimeError("canary discovery limits are not frozen")
+    raw_rounds = search.get("rounds")
+    if not isinstance(raw_rounds, list) or len(raw_rounds) != CANARY_MAX_ROUNDS:
+        raise RuntimeError("adaptive canary rounds are not exactly bounded")
+    rounds = tuple(
+        (
+            _parse_utc(item["start"]),
+            _parse_utc(item["end"]),
+            int(item["step_minutes"]),
+        )
+        for item in raw_rounds
+    )
     authority = Authority(
         _parse_utc(raw["coverage_start"]),
         _parse_utc(raw["release_cutoff"]),
         assets,
-        _parse_utc(search["start"]),
-        _parse_utc(search["end"]),
-        int(search["step_minutes"]),
+        rounds[0][0],
+        rounds[0][1],
+        rounds[0][2],
+        rounds,
     )
     if authority.cutoff <= authority.start:
         raise RuntimeError("release cutoff must follow release start")
@@ -183,26 +206,37 @@ def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
         or authority.cutoff > PMXT_OBJECT_COVERAGE_CUTOFF
     ):
         raise RuntimeError("production coverage exceeds authoritative PMXT validation coverage")
-    if authority.canary_search_start < authority.canary_search_end:
-        raise RuntimeError("canary search must run newest to oldest")
-    if (
-        authority.canary_search_end < authority.start
-        or authority.canary_search_start + timedelta(minutes=15) > authority.cutoff
-    ):
-        raise RuntimeError("canary search exceeds production source coverage")
-    if authority.canary_step_minutes not in {15, 30, 60}:
-        raise RuntimeError("canary search step is outside the finite allowed set")
-    candidates = _candidate_starts(authority)
-    if len(candidates) != CANARY_MAX_CANDIDATES:
-        raise RuntimeError("canary search does not use its exact bounded candidate budget")
-    if len({datetime.fromtimestamp(start, UTC).date() for start in candidates}) != 1:
-        raise RuntimeError("canary search must fit one UTC source-reuse day")
-    source_bundle = pmxt_hourly_objects(
-        (min(candidates) - 3_600) * 1_000_000_000,
-        (max(candidates) + 900) * 1_000_000_000,
-    )
-    if len(source_bundle) != CANARY_MAX_SOURCE_OBJECTS:
-        raise RuntimeError("canary search does not fit its source-object budget")
+    all_candidates: list[int] = []
+    for start, end, step in rounds:
+        if (
+            start < authority.start
+            or start >= authority.cutoff
+            or end < authority.start
+            or end >= authority.cutoff
+            or start < end
+            or step not in {15, 30, 60}
+        ):
+            raise RuntimeError("adaptive canary round exceeds frozen coverage or cadence")
+        selected = replace(
+            authority,
+            canary_search_start=start,
+            canary_search_end=end,
+            canary_step_minutes=step,
+        )
+        candidates = _candidate_starts(selected)
+        if len(candidates) != CANARY_MAX_CANDIDATES:
+            raise RuntimeError("canary round does not use its exact candidate budget")
+        if len({datetime.fromtimestamp(item, UTC).date() for item in candidates}) != 1:
+            raise RuntimeError("canary round must fit one UTC source-reuse day")
+        source_bundle = pmxt_hourly_objects(
+            (min(candidates) - 3_600) * 1_000_000_000,
+            (max(candidates) + 900) * 1_000_000_000,
+        )
+        if len(source_bundle) != CANARY_MAX_SOURCE_OBJECTS:
+            raise RuntimeError("canary round does not fit its source-object budget")
+        all_candidates.extend(candidates)
+    if len(all_candidates) != len(set(all_candidates)):
+        raise RuntimeError("adaptive canary rounds reuse a candidate identity")
     return authority
 
 
@@ -243,9 +277,12 @@ def _validate_receipt_coverage(
     ):
         raise RuntimeError("canary receipt has malformed authenticated coverage")
     usable_by_start = {start: set[Asset]() for start in qualified_starts}
+    seen_market_ids: set[str] = set()
+    seen_conditions: set[str] = set()
     for asset in authority.assets:
         starts = usable_raw[asset.value]
         proof = proofs_raw[asset.value]
+        bindings = proof.get("accepted_market_bindings") if isinstance(proof, dict) else None
         if (
             not isinstance(starts, list)
             or not starts
@@ -255,8 +292,43 @@ def _validate_receipt_coverage(
             or proof.get("accepted_market_starts") != starts
             or proof.get("quality") != "TIER_A"
             or re.fullmatch(r"[0-9a-f]{64}", str(proof.get("manifest_sha256", ""))) is None
+            or not isinstance(proof.get("release_tag"), str)
+            or not proof["release_tag"]
+            or proof["release_tag"] not in receipt.get("release_tags", [])
+            or not isinstance(bindings, list)
+            or len(bindings) != len(starts)
         ):
             raise RuntimeError("canary receipt usable evidence is not proof-bound")
+        binding_by_start: dict[int, dict[str, Any]] = {}
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                raise RuntimeError("canary receipt has malformed market identity binding")
+            market_start = int(binding.get("market_start", -1))
+            token_ids = binding.get("token_ids")
+            market_id = str(binding.get("market_id", ""))
+            condition_id = str(binding.get("condition_id", ""))
+            if (
+                market_start in binding_by_start
+                or market_start not in starts
+                or not market_id
+                or market_id in seen_market_ids
+                or condition_id in seen_conditions
+                or re.fullmatch(r"0x[0-9a-fA-F]{64}", condition_id) is None
+                or not isinstance(token_ids, list)
+                or len(token_ids) != 2
+                or len(set(token_ids)) != 2
+                or any(re.fullmatch(r"[0-9]+", str(token)) is None for token in token_ids)
+                or binding.get("official_outcome") not in {"UP", "DOWN", "SPLIT"}
+                or not str(binding.get("resolution_source_url", "")).startswith(
+                    "https://data.chain.link/streams/"
+                )
+            ):
+                raise RuntimeError("canary receipt has malformed market identity binding")
+            binding_by_start[market_start] = binding
+            seen_market_ids.add(market_id)
+            seen_conditions.add(condition_id)
+        if set(binding_by_start) != set(starts):
+            raise RuntimeError("canary receipt market bindings do not match usable starts")
         for start in starts:
             usable_by_start[int(start)].add(asset)
     computed = minimum_canary_cover(
@@ -288,7 +360,15 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         or not isinstance(asset_starts, dict)
     ):
         raise RuntimeError("canary receipt has malformed coverage selection")
-    allowed_starts = set(_candidate_starts(authority))
+    prior = json.loads(PRIOR_EVIDENCE_PATH.read_bytes())
+    prior_starts = {int(item["start"]) for item in prior["qualified_markets"]}
+    allowed_starts = prior_starts | {
+        candidate
+        for round_authority in _adaptive_round_authorities(authority)
+        for candidate in _candidate_starts(round_authority)
+    }
+    release_tags = receipt.get("release_tags", [])
+    executed_rounds = int(receipt.get("executed_rounds", 0))
     if (
         receipt.get("status") != "PASSED"
         or receipt.get("dataset_id") != "polymarket-15m-seven-v1"
@@ -300,25 +380,42 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         or receipt.get("usable_market_bindings") != len(authority.assets)
         or receipt.get("legitimate_exclusion_contract_checks") != len(authority.assets)
         or receipt.get("canary_release_prefix") != CANARY_RELEASE_PREFIX
-        or not str(receipt.get("release_tag", "")).startswith(f"{CANARY_RELEASE_PREFIX}-")
-        or receipt.get("candidate_limit") != CANARY_MAX_CANDIDATES
-        or not 1 <= int(receipt.get("qualified_candidates", 0)) <= CANARY_MAX_CANDIDATES
-        or len(qualified_starts) != int(receipt.get("qualified_candidates", 0))
+        or receipt.get("prior_evidence_assets") != [Asset.BTC.value]
+        or not isinstance(release_tags, list)
+        or len(release_tags) != executed_rounds + 1
+        or len(release_tags) != len(set(release_tags))
+        or release_tags[0] != prior.get("release_tag")
+        or any(
+            not str(tag).startswith(f"{CANARY_RELEASE_PREFIX}-") for tag in release_tags[1:]
+        )
+        or receipt.get("new_candidate_limit") != CANARY_MAX_CANDIDATES_TOTAL
+        or not 1 <= executed_rounds <= CANARY_MAX_ROUNDS
+        or not executed_rounds
+        <= int(receipt.get("qualified_new_candidates", 0))
+        <= executed_rounds * CANARY_MAX_CANDIDATES
+        or int(receipt.get("qualified_candidates_total", 0))
+        != len(prior_starts) + int(receipt.get("qualified_new_candidates", 0))
+        or len(qualified_starts) != int(receipt.get("qualified_candidates_total", 0))
         or len(qualified_starts) != len(set(qualified_starts))
         or not set(qualified_starts).issubset(allowed_starts)
-        or not 1 <= len(selected_starts) <= CANARY_MAX_CANDIDATES
+        or not prior_starts.issubset(set(qualified_starts))
+        or not 1 <= len(selected_starts) <= len(authority.assets)
         or not set(selected_starts).issubset(set(qualified_starts))
         or receipt.get("common_window") != (len(selected_starts) == 1)
         or set(asset_starts) != {asset.value for asset in authority.assets}
         or not set(asset_starts.values()).issubset(set(selected_starts))
-        or not len(authority.assets)
-        <= int(receipt.get("gamma_requests", 0))
-        <= CANARY_MAX_GAMMA_REQUESTS
-        or not 1 <= int(receipt.get("source_head_requests", 0)) <= CANARY_MAX_SOURCE_OBJECTS
-        or receipt.get("shared_source_transfer_owners") != 1
-        or not 1 <= int(receipt.get("shared_pmxt_objects", 0)) <= CANARY_MAX_SOURCE_OBJECTS
+        or not 8 < int(receipt.get("gamma_requests", 0)) <= CANARY_MAX_GAMMA_REQUESTS_TOTAL
+        or not 1
+        <= int(receipt.get("source_head_requests", 0))
+        <= CANARY_MAX_SOURCE_OBJECTS_TOTAL
+        or receipt.get("shared_source_transfer_owners") != executed_rounds
+        or not 1
+        <= int(receipt.get("shared_pmxt_objects", 0))
+        <= CANARY_MAX_SOURCE_OBJECTS_TOTAL
         or receipt.get("shared_pmxt_objects") != receipt.get("source_head_requests")
-        or not 1 <= int(receipt.get("source_transfer_bytes", 0)) <= CANARY_MAX_SOURCE_BYTES
+        or not 1
+        <= int(receipt.get("source_transfer_bytes", 0))
+        <= CANARY_MAX_SOURCE_BYTES_TOTAL
         or int(receipt.get("canonical_bytes", 0)) < 1
         or receipt.get("isolated_from_production") is not True
         or float(receipt.get("timeout_margin_seconds", 0)) <= 3_600
@@ -576,8 +673,20 @@ def verify_remote_partition(
         "accepted_market_starts": sorted(
             int(row["market_start_ns"]) // 1_000_000_000 for row in market_rows
         ),
+        "accepted_market_bindings": [
+            {
+                "market_id": str(row["market_id"]),
+                "condition_id": str(row["condition_id"]),
+                "token_ids": sorted((str(row["token_up"]), str(row["token_down"]))),
+                "market_start": int(row["market_start_ns"]) // 1_000_000_000,
+                "official_outcome": str(row["official_outcome"]),
+                "resolution_source_url": str(row["resolution_source_url"]),
+            }
+            for row in sorted(market_rows, key=lambda item: int(item["market_start_ns"]))
+        ],
         "exclusions": len(exclusion_rows),
         "manifest_sha256": hashlib.sha256(payload).hexdigest(),
+        "tool_commit": str(manifest["tool_commit"]),
         "pmxt_urls": sorted(
             item["source_url"] for item in manifest["provenance"] if item["source_id"] == "pmxt_v2"
         ),
@@ -771,21 +880,30 @@ def _pmxt_source_identity(source: SourceObject) -> tuple[int, str]:
 def qualify_canary_candidates(
     authority: Authority,
     source_identity: Callable[[SourceObject], tuple[int, str]] = _pmxt_source_identity,
+    assets: tuple[Asset, ...] | None = None,
+    prior_market_ids: frozenset[str] = frozenset(),
+    prior_conditions: frozenset[str] = frozenset(),
 ) -> CanaryQualification:
+    selected_assets = assets or authority.assets
+    if not selected_assets or len(selected_assets) != len(set(selected_assets)):
+        raise RuntimeError("canary qualification requires unique uncovered assets")
+    if not set(selected_assets).issubset(set(authority.assets)):
+        raise RuntimeError("canary qualification asset is outside frozen scope")
+    gamma_limit = CANARY_MAX_CANDIDATES * len(selected_assets)
     gamma = GammaClient(fetch=_fetch_gamma)
     gamma_requests = 0
     source_requests = 0
     candidates: list[QualifiedCandidate] = []
     source_identities: dict[str, tuple[int, str]] = {}
-    seen_market_ids: set[str] = set()
-    seen_conditions: set[str] = set()
+    seen_market_ids = set(prior_market_ids)
+    seen_conditions = set(prior_conditions)
     for start in _candidate_starts(authority):
         markets: list[tuple[Asset, Market]] = []
         payloads: list[tuple[Asset, bytes, str]] = []
         rejected = False
-        for asset in authority.assets:
+        for asset in selected_assets:
             gamma_requests += 1
-            if gamma_requests > CANARY_MAX_GAMMA_REQUESTS:
+            if gamma_requests > gamma_limit:
                 raise RuntimeError("canary exceeded its Gamma request budget")
             try:
                 market, payload, url = gamma.fetch_market(asset, start)
@@ -806,8 +924,8 @@ def qualify_canary_candidates(
         market_ids = {market.market_id for _, market in markets}
         conditions = {market.condition_id for _, market in markets}
         if (
-            len(market_ids) != len(authority.assets)
-            or len(conditions) != len(authority.assets)
+            len(market_ids) != len(selected_assets)
+            or len(conditions) != len(selected_assets)
             or market_ids & seen_market_ids
             or conditions & seen_conditions
         ):
@@ -871,27 +989,144 @@ def minimum_canary_cover(
     raise RuntimeError("bounded canary candidates provide no usable evidence cover")
 
 
-def command_canary() -> None:
-    if not os.environ.get("GITHUB_TOKEN"):
-        raise RuntimeError("canary requires authenticated GitHub remote authority")
-    run_id = os.environ.get("GITHUB_RUN_ID", "")
-    if not run_id.isdigit():
-        raise RuntimeError("canary requires its numeric GitHub Actions run identity")
-    authority = load_authority()
-    began = time.monotonic()
-    disk_before = shutil.disk_usage(Path.cwd()).free
-    production_before = remote_inventory()
-    qualification = qualify_canary_candidates(authority)
+def _adaptive_round_authorities(authority: Authority) -> tuple[Authority, ...]:
+    return tuple(
+        replace(
+            authority,
+            canary_search_start=start,
+            canary_search_end=end,
+            canary_step_minutes=step,
+        )
+        for start, end, step in authority.canary_rounds
+    )
+
+
+def _verify_prior_canary_evidence(
+    authority: Authority,
+    path: Path = PRIOR_EVIDENCE_PATH,
+) -> tuple[dict[str, Any], dict[str, Market], int, str]:
+    raw = json.loads(path.read_bytes())
+    if (
+        raw.get("schema_version") != "1.0.0"
+        or raw.get("accessed_at") != "2026-08-16"
+        or raw.get("asset") != Asset.BTC.value
+        or raw.get("timeframe") != "15m"
+        or raw.get("partition_id") != "BTC/15m/2026-08-09"
+        or raw.get("run_url")
+        != "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31914715144"
+        or not str(raw.get("release_tag", "")).startswith(
+            "polymarket-15m-seven-canary-v3-"
+        )
+        or re.fullmatch(r"[0-9a-f]{64}", str(raw.get("manifest_sha256", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(raw.get("tool_commit", ""))) is None
+    ):
+        raise RuntimeError("prior canary evidence identity is malformed")
+    qualified = raw.get("qualified_markets")
+    accepted = raw.get("accepted_market_starts")
+    sources = raw.get("source_objects")
+    if (
+        not isinstance(qualified, list)
+        or len(qualified) != 8
+        or not isinstance(accepted, list)
+        or not accepted
+        or not isinstance(sources, list)
+        or len(sources) != 3
+    ):
+        raise RuntimeError("prior canary evidence coverage is malformed")
+    starts = [int(item["start"]) for item in qualified]
+    if (
+        len(starts) != len(set(starts))
+        or any(start % 900 for start in starts)
+        or accepted != sorted(set(int(start) for start in accepted))
+        or not set(accepted).issubset(set(starts))
+        or len({str(item["url"]) for item in sources}) != len(sources)
+        or any(
+            int(item["byte_length"]) <= 0
+            or not str(item["etag"])
+            or not str(item["url"]).startswith("https://r2v2.pmxt.dev/")
+            for item in sources
+        )
+    ):
+        raise RuntimeError("prior canary evidence is not uniquely source-bound")
+    gamma = GammaClient(fetch=_fetch_gamma)
+    expected_candidates: dict[str, Market] = {}
+    expected_gamma: set[tuple[str, int, str]] = set()
+    expected_conditions: set[str] = set()
+    for item in qualified:
+        start = int(item["start"])
+        market, payload, url = gamma.fetch_market(Asset.BTC, start)
+        digest = hashlib.sha256(payload).hexdigest()
+        if (
+            market.asset is not Asset.BTC
+            or market.timeframe != "15m"
+            or market.market_start_ns != start * 1_000_000_000
+            or digest != str(item["gamma_sha256"])
+            or market.market_id in expected_candidates
+            or market.condition_id in expected_conditions
+        ):
+            raise RuntimeError("prior BTC Gamma authority changed")
+        expected_candidates[market.market_id] = market
+        expected_conditions.add(market.condition_id)
+        expected_gamma.add((url, len(payload), digest))
+    expected_sources = frozenset(
+        (str(item["url"]), int(item["byte_length"]), str(item["etag"])) for item in sources
+    )
+    deterministic_source_urls = {
+        source.url
+        for source in pmxt_hourly_objects(
+            (min(starts) - 3_600) * 1_000_000_000,
+            (max(starts) + 900) * 1_000_000_000,
+        )
+    }
+    if {item[0] for item in expected_sources} != deterministic_source_urls:
+        raise RuntimeError("prior BTC source bundle is not the deterministic causal inventory")
+    release_tag = str(raw["release_tag"])
+    proof = verify_remote_partition(
+        str(raw["partition_id"]),
+        remote_inventory(exact_tags={release_tag}),
+        expected_sources=expected_sources,
+        expected_candidates=expected_candidates,
+        expected_gamma=frozenset(expected_gamma),
+    )
+    if (
+        proof["quality"] != "TIER_A"
+        or proof["manifest_sha256"] != raw["manifest_sha256"]
+        or proof["tool_commit"] != raw["tool_commit"]
+        or proof["accepted_market_starts"] != accepted
+        or not proof["authenticated_redownload"]
+    ):
+        raise RuntimeError("prior BTC canary proof is not reusable authority")
+    if any(
+        not (
+            int(authority.start.timestamp())
+            <= market.market_start_ns // 1_000_000_000
+            < int(authority.cutoff.timestamp())
+        )
+        for market in expected_candidates.values()
+    ):
+        raise RuntimeError("prior BTC proof is outside current production authority")
+    return proof, expected_candidates, len(qualified), release_tag
+
+
+def _execute_canary_round(
+    authority: Authority,
+    qualification: CanaryQualification,
+    assets: tuple[Asset, ...],
+    run_id: str,
+    round_index: int,
+    disk_before: int,
+    deadline: float,
+) -> dict[str, Any]:
     starts = tuple(candidate.start for candidate in qualification.candidates)
     day = datetime.fromtimestamp(starts[0], UTC).date()
     coverage_start = datetime.fromtimestamp(min(starts), UTC)
     cutoff = datetime.fromtimestamp(max(starts) + 900, UTC)
-    release_prefix = f"{CANARY_RELEASE_PREFIX}-{run_id}-{max(starts)}-{min(starts)}"
+    release_prefix = (
+        f"{CANARY_RELEASE_PREFIX}-{run_id}-r{round_index}-{max(starts)}-{min(starts)}"
+    )
     release_tag = f"{release_prefix}-{release_bucket(day)}"
-    markets_by_asset: dict[Asset, dict[str, Market]] = {asset: {} for asset in authority.assets}
-    gamma_by_asset: dict[Asset, set[tuple[str, int, str]]] = {
-        asset: set() for asset in authority.assets
-    }
+    markets_by_asset: dict[Asset, dict[str, Market]] = {asset: {} for asset in assets}
+    gamma_by_asset: dict[Asset, set[tuple[str, int, str]]] = {asset: set() for asset in assets}
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         work_root = root / "work"
@@ -903,7 +1138,9 @@ def command_canary() -> None:
             for asset, payload, url in candidate.payloads:
                 market = candidate_markets[asset]
                 markets_by_asset[asset][market.market_id] = market
-                gamma_by_asset[asset].add((url, len(payload), hashlib.sha256(payload).hexdigest()))
+                gamma_by_asset[asset].add(
+                    (url, len(payload), hashlib.sha256(payload).hexdigest())
+                )
                 slug = f"{asset.value.lower()}-updown-15m-{candidate.start}"
                 cache = work_root / f"{asset.value}-{day.isoformat()}" / "official"
                 cache.mkdir(parents=True, exist_ok=True)
@@ -920,7 +1157,7 @@ def command_canary() -> None:
                         markets_by_asset[asset].values(), key=lambda item: item.market_start_ns
                     )
                 ]
-                for asset in authority.assets
+                for asset in assets
             },
         )
         _atomic_json(
@@ -941,76 +1178,236 @@ def command_canary() -> None:
         sampler = threading.Thread(target=sample_disk, daemon=True)
         sampler.start()
         try:
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "scripts.run_backfill",
-                    "--work-root",
-                    str(work_root),
-                    "--ledger",
-                    str(ledger_path),
-                    "--start",
-                    day.isoformat(),
-                    "--end",
-                    day.isoformat(),
-                    "--coverage-start",
-                    coverage_start.isoformat(),
-                    "--cutoff",
-                    cutoff.isoformat(),
-                    "--market-starts",
-                    ",".join(str(start) for start in starts),
-                    "--release-prefix",
-                    release_prefix,
-                    "--expected-market-identities",
-                    str(expected_markets_path),
-                    "--expected-source-identities",
-                    str(expected_sources_path),
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("adaptive canary exhausted its five-hour execution bound")
+            try:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "scripts.run_backfill",
+                        "--work-root",
+                        str(work_root),
+                        "--ledger",
+                        str(ledger_path),
+                        "--start",
+                        day.isoformat(),
+                        "--end",
+                        day.isoformat(),
+                        "--coverage-start",
+                        coverage_start.isoformat(),
+                        "--cutoff",
+                        cutoff.isoformat(),
+                        "--assets",
+                        ",".join(asset.value for asset in assets),
+                        "--market-starts",
+                        ",".join(str(start) for start in starts),
+                        "--release-prefix",
+                        release_prefix,
+                        "--expected-market-identities",
+                        str(expected_markets_path),
+                        "--expected-source-identities",
+                        str(expected_sources_path),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=remaining,
+                )
+            except subprocess.TimeoutExpired as exc:
+                if exc.stdout:
+                    sys.stdout.write(str(exc.stdout))
+                if exc.stderr:
+                    sys.stderr.write(str(exc.stderr))
+                raise RuntimeError(
+                    "adaptive canary child exhausted its five-hour execution bound"
+                ) from exc
         finally:
             stop_sampling.set()
             sampler.join()
         _raise_child_failure(completed)
         sys.stdout.write(completed.stdout)
         ledger = json.loads(ledger_path.read_bytes())
-    if len(ledger["partitions"]) != len(authority.assets):
-        raise RuntimeError("canary did not execute exactly seven isolated partitions")
+    if len(ledger["partitions"]) != len(assets):
+        raise RuntimeError("adaptive round did not execute each uncovered asset")
     if any(
-        item["markets"] != len(qualification.candidates) for item in ledger["partitions"].values()
+        item["markets"] != len(qualification.candidates)
+        for item in ledger["partitions"].values()
     ):
-        raise RuntimeError("canary execution lost an authoritative candidate identity")
-
-    canary_inventory = remote_inventory(exact_tags={release_tag})
-    proofs: list[dict[str, Any]] = []
-    proofs_by_asset: dict[Asset, dict[str, Any]] = {}
+        raise RuntimeError("adaptive round lost an authoritative candidate identity")
+    inventory = remote_inventory(exact_tags={release_tag})
     expected_sources = frozenset(qualification.source_objects)
-    usable_by_start = {start: set[Asset]() for start in starts}
-    for asset in authority.assets:
+    proofs: dict[Asset, dict[str, Any]] = {}
+    for asset in assets:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("adaptive canary exhausted its five-hour execution bound")
         partition = f"{asset.value}/15m/{day.isoformat()}"
         proof = verify_remote_partition(
             partition,
-            canary_inventory,
+            inventory,
             expected_sources=expected_sources,
             expected_candidates=markets_by_asset[asset],
             expected_gamma=frozenset(gamma_by_asset[asset]),
         )
         if not proof["authenticated_redownload"]:
-            raise RuntimeError("canary publication proof is incomplete")
-        for start in proof["accepted_market_starts"]:
-            usable_by_start[int(start)].add(asset)
-        proofs.append(proof)
-        proofs_by_asset[asset] = proof
+            raise RuntimeError("adaptive canary publication proof is incomplete")
+        proofs[asset] = proof
         verify_remote_partition(
             partition,
-            canary_inventory,
+            inventory,
             expected_sources=expected_sources,
             expected_candidates=markets_by_asset[asset],
             expected_gamma=frozenset(gamma_by_asset[asset]),
         )
+    if time.monotonic() >= deadline:
+        raise RuntimeError("adaptive canary exhausted its five-hour execution bound")
+    source_bytes = sum(int(item["source_bytes"]) for item in ledger["partitions"].values())
+    source_owners = sum(
+        int(item["source_bytes"]) > 0 for item in ledger["partitions"].values()
+    )
+    if source_owners != 1 or not 0 < source_bytes <= CANARY_MAX_SOURCE_BYTES:
+        raise RuntimeError("adaptive round did not share one bounded PMXT transfer")
+    return {
+        "starts": starts,
+        "release_tag": release_tag,
+        "proofs": proofs,
+        "markets_by_asset": markets_by_asset,
+        "source_bytes": source_bytes,
+        "source_owners": source_owners,
+        "source_objects": len(qualification.source_objects),
+        "gamma_requests": qualification.gamma_requests,
+        "source_requests": qualification.source_requests,
+        "minimum_free_disk": minimum_free_disk,
+        "peak_rss_kib": max(
+            int(item["peak_rss_kib"]) for item in ledger["partitions"].values()
+        ),
+        "canonical_bytes": sum(int(proof["bytes"]) for proof in proofs.values()),
+    }
+
+
+def command_canary() -> None:
+    if not os.environ.get("GITHUB_TOKEN"):
+        raise RuntimeError("canary requires authenticated GitHub remote authority")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if not run_id.isdigit():
+        raise RuntimeError("canary requires its numeric GitHub Actions run identity")
+    authority = load_authority()
+    began = time.monotonic()
+    deadline = began + CANARY_MAX_WALL_SECONDS
+    disk_before = shutil.disk_usage(Path.cwd()).free
+    production_before = remote_inventory()
+    prior_proof, prior_candidates, prior_gamma_requests, prior_tag = (
+        _verify_prior_canary_evidence(authority)
+    )
+    usable_by_start: dict[int, set[Asset]] = {
+        market.market_start_ns // 1_000_000_000: set()
+        for market in prior_candidates.values()
+    }
+    for start in prior_proof["accepted_market_starts"]:
+        usable_by_start[int(start)].add(Asset.BTC)
+    proofs_by_asset: dict[Asset, dict[str, Any]] = {Asset.BTC: prior_proof}
+    proof_tags: dict[Asset, str] = {Asset.BTC: prior_tag}
+    uncovered = tuple(asset for asset in authority.assets if asset not in proofs_by_asset)
+    release_tags = [prior_tag]
+    gamma_requests = prior_gamma_requests
+    source_requests = 0
+    source_objects = 0
+    source_bytes = 0
+    source_owners = 0
+    canonical_bytes = int(prior_proof["bytes"])
+    minimum_free_disk = disk_before
+    peak_rss_kib = 1
+    first_prior_market = next(iter(prior_candidates.values()))
+    prior_tier, prior_exclusion = classify(
+        first_prior_market,
+        False,
+        [(first_prior_market.market_start_ns, first_prior_market.market_end_ns)],
+    )
+    if prior_tier.value != "EXCLUDED" or prior_exclusion is None or not prior_exclusion.evidence:
+        raise RuntimeError("fail-closed exclusion contract lacks actual-market evidence")
+    checked_exclusion_assets = {Asset.BTC}
+    executed_rounds = 0
+    qualified_starts = set(usable_by_start)
+    seen_market_ids = set(prior_candidates)
+    seen_conditions = {market.condition_id for market in prior_candidates.values()}
+
+    for round_index, round_authority in enumerate(_adaptive_round_authorities(authority), 1):
+        if not uncovered:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("adaptive canary exhausted its five-hour execution bound")
+        qualification = qualify_canary_candidates(
+            round_authority,
+            assets=uncovered,
+            prior_market_ids=frozenset(seen_market_ids),
+            prior_conditions=frozenset(seen_conditions),
+        )
+        if time.monotonic() >= deadline:
+            raise RuntimeError("adaptive canary exhausted its five-hour execution bound")
+        for candidate in qualification.candidates:
+            for _, market in candidate.markets:
+                seen_market_ids.add(market.market_id)
+                seen_conditions.add(market.condition_id)
+        gamma_requests += qualification.gamma_requests
+        source_requests += qualification.source_requests
+        source_objects += len(qualification.source_objects)
+        expected_bytes = sum(item[1] for item in qualification.source_objects)
+        if (
+            gamma_requests > CANARY_MAX_GAMMA_REQUESTS_TOTAL
+            or source_requests > CANARY_MAX_SOURCE_OBJECTS_TOTAL
+            or source_objects > CANARY_MAX_SOURCE_OBJECTS_TOTAL
+            or source_bytes + expected_bytes > CANARY_MAX_SOURCE_BYTES_TOTAL
+        ):
+            raise RuntimeError("adaptive canary exceeded its frozen aggregate search bounds")
+        result = _execute_canary_round(
+            round_authority,
+            qualification,
+            uncovered,
+            run_id,
+            round_index,
+            disk_before,
+            deadline,
+        )
+        executed_rounds += 1
+        release_tags.append(str(result["release_tag"]))
+        source_bytes += int(result["source_bytes"])
+        source_owners += int(result["source_owners"])
+        canonical_bytes += int(result["canonical_bytes"])
+        minimum_free_disk = min(minimum_free_disk, int(result["minimum_free_disk"]))
+        peak_rss_kib = max(peak_rss_kib, int(result["peak_rss_kib"]))
+        round_starts = {int(start) for start in result["starts"]}
+        qualified_starts.update(round_starts)
+        for start in round_starts:
+            usable_by_start.setdefault(start, set())
+        for asset in uncovered:
+            proof = cast(dict[str, Any], result["proofs"][asset])
+            if asset not in checked_exclusion_assets:
+                sample_market = next(iter(result["markets_by_asset"][asset].values()))
+                tier, exclusion = classify(
+                    sample_market,
+                    False,
+                    [(sample_market.market_start_ns, sample_market.market_end_ns)],
+                )
+                if tier.value != "EXCLUDED" or exclusion is None or not exclusion.evidence:
+                    raise RuntimeError(
+                        "fail-closed exclusion contract lacks actual-market evidence"
+                    )
+                checked_exclusion_assets.add(asset)
+            for start in proof["accepted_market_starts"]:
+                usable_by_start[int(start)].add(asset)
+            if proof["quality"] == "TIER_A" and proof["accepted_market_starts"]:
+                proofs_by_asset[asset] = proof
+                proof_tags[asset] = str(result["release_tag"])
+        uncovered = tuple(asset for asset in uncovered if asset not in proofs_by_asset)
+
+    if uncovered:
+        names = ",".join(asset.value for asset in uncovered)
+        raise RuntimeError(
+            f"adaptive canary exhausted bounded search without usable proof: {names}"
+        )
+    if source_owners != executed_rounds:
+        raise RuntimeError("each adaptive round must charge exactly one shared PMXT transfer")
     selected_starts = minimum_canary_cover(
         {start: frozenset(assets) for start, assets in usable_by_start.items()},
         authority.assets,
@@ -1025,31 +1422,19 @@ def command_canary() -> None:
         )
         for asset in authority.assets
     }
-    common_pmxt_urls = set(proofs[0]["pmxt_urls"])
-    if not common_pmxt_urls or any(set(proof["pmxt_urls"]) != common_pmxt_urls for proof in proofs):
-        raise RuntimeError("seven assets do not share one PMXT acquisition inventory")
     if remote_inventory() != production_before:
         raise RuntimeError("isolated canary publication changed production authority")
-
-    exclusion_checks = 0
-    for _, market in qualification.candidates[0].markets:
-        tier, exclusion = classify(market, False, [(market.market_start_ns, market.market_end_ns)])
-        if tier.value != "EXCLUDED" or exclusion is None or not exclusion.evidence:
-            raise RuntimeError("fail-closed exclusion contract lacks actual-market evidence")
-        exclusion_checks += 1
+    if time.monotonic() >= deadline:
+        raise RuntimeError("adaptive canary exhausted its five-hour execution bound")
     wall_seconds = time.monotonic() - began
     disk_after = shutil.disk_usage(Path.cwd()).free
-    source_bytes = sum(int(item["source_bytes"]) for item in ledger["partitions"].values())
-    source_owners = sum(int(item["source_bytes"]) > 0 for item in ledger["partitions"].values())
-    if source_owners != 1 or not 0 < source_bytes <= CANARY_MAX_SOURCE_BYTES:
-        raise RuntimeError("shared PMXT transfer was not charged exactly once")
     receipt: dict[str, Any] = {
         "schema_version": "1.0.0",
         "dataset_id": "polymarket-15m-seven-v1",
         "status": "PASSED",
         "timeframe": "15m",
         "assets": [asset.value for asset in authority.assets],
-        "qualified_market_starts": list(starts),
+        "qualified_market_starts": sorted(qualified_starts),
         "selected_market_starts": list(selected_starts),
         "asset_market_starts": asset_market_starts,
         "usable_market_starts_by_asset": usable_market_starts_by_asset,
@@ -1058,29 +1443,36 @@ def command_canary() -> None:
                 "accepted_market_starts": usable_market_starts_by_asset[asset.value],
                 "manifest_sha256": proofs_by_asset[asset]["manifest_sha256"],
                 "quality": proofs_by_asset[asset]["quality"],
+                "accepted_market_bindings": proofs_by_asset[asset][
+                    "accepted_market_bindings"
+                ],
+                "release_tag": proof_tags[asset],
             }
             for asset in authority.assets
         },
         "common_window": len(selected_starts) == 1,
-        "release_tag": release_tag,
+        "release_tags": release_tags,
+        "prior_evidence_assets": [Asset.BTC.value],
+        "executed_rounds": executed_rounds,
         "canary_release_prefix": CANARY_RELEASE_PREFIX,
         "isolated_from_production": True,
-        "candidate_limit": CANARY_MAX_CANDIDATES,
-        "qualified_candidates": len(qualification.candidates),
-        "gamma_requests": qualification.gamma_requests,
-        "source_head_requests": qualification.source_requests,
+        "new_candidate_limit": CANARY_MAX_CANDIDATES_TOTAL,
+        "qualified_new_candidates": len(qualified_starts) - len(prior_candidates),
+        "qualified_candidates_total": len(qualified_starts),
+        "gamma_requests": gamma_requests,
+        "source_head_requests": source_requests,
         "settlement_bindings": len(authority.assets),
         "usable_market_bindings": len(asset_market_starts),
-        "shared_pmxt_objects": len(common_pmxt_urls),
+        "shared_pmxt_objects": source_objects,
         "shared_source_transfer_owners": source_owners,
         "source_transfer_bytes": source_bytes,
-        "canonical_bytes": sum(int(proof["bytes"]) for proof in proofs),
-        "authenticated_no_op_partitions": len(proofs),
-        "legitimate_exclusion_contract_checks": exclusion_checks,
+        "canonical_bytes": canonical_bytes,
+        "authenticated_no_op_partitions": len(proofs_by_asset),
+        "legitimate_exclusion_contract_checks": len(checked_exclusion_assets),
         "unexplained_failures": 0,
         "wall_seconds": wall_seconds,
         "timeout_margin_seconds": 21_600 - wall_seconds,
-        "peak_rss_kib": max(int(item["peak_rss_kib"]) for item in ledger["partitions"].values()),
+        "peak_rss_kib": peak_rss_kib,
         "disk_free_before_bytes": disk_before,
         "disk_free_after_bytes": disk_after,
         "minimum_free_disk_bytes": minimum_free_disk,

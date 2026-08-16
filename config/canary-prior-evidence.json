@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0.0",
+  "accessed_at": "2026-08-16",
+  "asset": "BTC",
+  "timeframe": "15m",
+  "run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31914715144",
+  "release_tag": "polymarket-15m-seven-canary-v3-31914715144-1786319100-1786312800-2026-08-a",
+  "partition_id": "BTC/15m/2026-08-09",
+  "manifest_sha256": "554749b51547b769aea8a1011ca243519f56bed0d165a9185bd1f040c5450f16",
+  "tool_commit": "217df25db92ad1567ee0754fa65791792b644ed4",
+  "qualified_markets": [
+    {"start": 1786312800, "gamma_sha256": "ad23048c265d84ce8fe43b1d474009d50af2e8bf15c2b713232bab8c86f7a9e5"},
+    {"start": 1786313700, "gamma_sha256": "34bc80ae3869bc350892c59b9e309e63278127e3d7153b0116da36fc0ade66ed"},
+    {"start": 1786314600, "gamma_sha256": "777ef33a7cef56b3b30b45d82bb67011cb8ba9c139b0c2ff59b9afe85712418e"},
+    {"start": 1786315500, "gamma_sha256": "728f2ce5e6f786bc245b0442ccd7520422cc9fb8dc366658c89b134484c86d57"},
+    {"start": 1786316400, "gamma_sha256": "98152c23957664ee615e77233eafef7daac896d81ccf8abe080ca5e7e1e8a639"},
+    {"start": 1786317300, "gamma_sha256": "2af97d3ddcb405dda214f419c018a35e853f04d10b539ce564cf5bfbe5ad3820"},
+    {"start": 1786318200, "gamma_sha256": "55937efe919ab07d9537b728ddf1f36aada39a603f40fe04b4f5fe6f43c2653b"},
+    {"start": 1786319100, "gamma_sha256": "4634feeac8fda64c2aa5622cf8a5e7b059b704522f02330124352fed3a1f07f6"}
+  ],
+  "accepted_market_starts": [1786312800, 1786313700, 1786315500, 1786316400, 1786317300, 1786319100],
+  "source_objects": [
+    {"url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T21.parquet", "byte_length": 552875673, "etag": "\"b2cd20b340ba96b99952030b4f6d47dd-66\""},
+    {"url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T22.parquet", "byte_length": 556866523, "etag": "\"71a50a8be1bcc6c411de818c10e317a7-67\""},
+    {"url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T23.parquet", "byte_length": 507501824, "etag": "\"49b3b199cc0253285a38108bf23f76a0-61\""}
+  ]
+}

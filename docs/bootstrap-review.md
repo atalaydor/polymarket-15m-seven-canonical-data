@@ -38,4 +38,8 @@ post-snapshot BBO/depth contradiction and was legitimately published as `EVENT_C
 and v2 Releases remain immutable isolated evidence. Replacement qualification now runs only on
 GitHub Actions: eight candidates share one bounded source bundle, fresh Gamma evidence precedes
 PMXT HEADs, and authenticated Tier A rows select a common window or the exact minimum multi-window
-cover. Production remains locked pending the v3 receipt.
+cover. Run 31914715144 then found BTC Tier A evidence, but 47 of the 48 non-BTC dispositions were
+legitimate post-snapshot `EVENT_CONFLICT` results and one was a legitimate XRP `SOURCE_GAP`.
+The authenticated matrix is frozen in `canary-v3-coverage-reconciliation.json`. BTC's exact v3 proof
+is reused only after fresh Gamma and remote-partition revalidation; uncovered assets use four
+source-reused, stratified, early-stopping v4 rounds. Production remains locked pending the receipt.
