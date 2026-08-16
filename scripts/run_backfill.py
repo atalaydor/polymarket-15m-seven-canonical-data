@@ -41,16 +41,18 @@ REPOSITORY = "atalaydor/polymarket-15m-seven-canonical-data"
 DATASET_RELEASE_PREFIX = "polymarket-15m-seven-v1"
 RETRY_DELAYS = (2, 8, 32)
 TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
-# Runs 31918682089/31918931139 measured 552,314 rows in one hourly fragment
-# and 760,428 rows across the complete causal inventory of one market. A 25%
-# margin covers expected market variance; one hourly object intersects at most
-# eight 15m markets when one hour of causal warm-up is retained.
-PMXT_MEASURED_ROWS_PER_MARKET_OBJECT = 552_314
+# Runs 31918682089/31918931139/31919192447 measured a maximum of 810,276
+# causal rows for one market in one hourly object. A 25% margin covers expected
+# market variance. A market's 75-minute causal interval intersects at most two
+# hourly objects, while one object intersects at most eight 15m markets.
+PMXT_MEASURED_ROWS_PER_MARKET_OBJECT = 810_276
 PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN = (
     PMXT_MEASURED_ROWS_PER_MARKET_OBJECT * 5 + 3
 ) // 4
-PMXT_MEASURED_ROWS_PER_MARKET = 760_428
-PMXT_ROWS_PER_MARKET_WITH_MARGIN = (PMXT_MEASURED_ROWS_PER_MARKET * 5 + 3) // 4
+PMXT_OBJECTS_PER_MARKET = 2
+PMXT_ROWS_PER_MARKET_WITH_MARGIN = (
+    PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN * PMXT_OBJECTS_PER_MARKET
+)
 PMXT_MARKETS_PER_ASSET_OBJECT = 8
 PMXT_FILTERED_ROWS_PER_ASSET_OBJECT = (
     PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN * PMXT_MARKETS_PER_ASSET_OBJECT

@@ -41,6 +41,13 @@
       "old_bound": 690393,
       "classification": "legitimate authoritative market inventory accumulated across two source objects"
     },
+    "measured_high_density_fragment_run": {
+      "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31919192447",
+      "condition_id": "0x0e4c1d275b6e477cd4d62b8ea07e905578acd9e126163d7b17f162a8e166d020",
+      "object_fragment_rows": 810276,
+      "old_bound": 690393,
+      "classification": "legitimate authoritative hourly fragment exceeded the earlier measured object bound"
+    },
     "runner_capacity": {
       "url": "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
       "label": "ubuntu-24.04 public repository",
@@ -51,18 +58,19 @@
     }
   },
   "derivation": {
-    "measured_max_rows_per_market_object": 552314,
-    "max_rows_per_market_object": 690393,
+    "measured_max_rows_per_market_object": 810276,
+    "max_rows_per_market_object": 1012845,
     "measured_max_rows_per_market": 760428,
     "safety_margin_numerator": 5,
     "safety_margin_denominator": 4,
-    "max_rows_per_market": 950535,
+    "max_hourly_objects_per_market": 2,
+    "max_rows_per_market": 2025690,
     "warmup_seconds": 3600,
     "market_seconds": 900,
     "market_step_seconds": 900,
     "max_relevant_markets_per_hourly_object": 8,
-    "max_rows_per_asset_object": 5523144,
+    "max_rows_per_asset_object": 8102760,
     "max_markets_per_asset_day": 96,
-    "max_rows_per_asset_day_partition": 91251360
+    "max_rows_per_asset_day_partition": 194466240
   }
 }
