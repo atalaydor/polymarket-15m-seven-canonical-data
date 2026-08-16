@@ -53,4 +53,7 @@ its remaining BNB/HYPE results were legitimate `EVENT_CONFLICT`, `SOURCE_GAP`, o
 12 later-period source-reused rounds only for BNB/HYPE. Run 31924347931 added authenticated BNB
 Tier A evidence; HYPE remained legitimately excluded by 55 `EVENT_CONFLICT` and 41 `SOURCE_GAP`
 dispositions. The v7 controller revalidates all six proofs and searches up to four complete,
-source-active UTC days only for HYPE. Production remains locked pending the receipt.
+source-active UTC days only for HYPE. Run 31925247344 found 13 authenticated HYPE Tier A markets in
+its first day and committed the seven-asset receipt. A checkout-newline defect in receipt digest
+verification required a platform-neutral control-plane hash and one final all-proof revalidation;
+production remains locked pending that replacement receipt.

@@ -36,12 +36,14 @@ from scripts.actions_backend import (
     RemoteAsset,
     _adaptive_round_authorities,
     _candidate_starts,
+    _control_plane_digest,
     _execute_canary_round,
     _load_prior_canary_evidence,
     _market_authority_projection,
     _pmxt_source_identity,
     _raise_child_failure,
     _request,
+    _require_canary_receipt,
     _revalidate_prior_canary_evidence,
     _validate_receipt_coverage,
     _verify_canary_dispositions,
@@ -127,7 +129,7 @@ class ActionsBackendTests(unittest.TestCase):
         )
         self.assertEqual(authority.start, datetime(2026, 4, 13, 20, tzinfo=UTC))
         self.assertEqual(authority.cutoff, datetime(2026, 8, 10, 1, tzinfo=UTC))
-        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 7, 23, 45, tzinfo=UTC))
+        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 5, 23, 45, tzinfo=UTC))
         candidates = _candidate_starts(authority)
         self.assertEqual(len(candidates), CANARY_MAX_CANDIDATES)
         self.assertEqual(len(_adaptive_round_authorities(authority)), CANARY_MAX_ROUNDS)
@@ -141,11 +143,17 @@ class ActionsBackendTests(unittest.TestCase):
         prior = _load_prior_canary_evidence(authority)
         self.assertEqual(
             set(prior),
-            {Asset.BTC, Asset.ETH, Asset.SOL, Asset.XRP, Asset.DOGE, Asset.BNB},
+            set(Asset),
         )
         self.assertEqual(
-            sum(len(item["qualified_market_starts"]) for item in prior.values()), 48
+            sum(len(item["qualified_market_starts"]) for item in prior.values()), 144
         )
+        prior_starts = {
+            int(start)
+            for item in prior.values()
+            for start in item["qualified_market_starts"]
+        }
+        self.assertFalse(set(all_candidates) & prior_starts)
 
     def test_production_entrypoints_use_import_safe_module_execution(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -168,6 +176,14 @@ class ActionsBackendTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_control_plane_digest_is_checkout_newline_independent(self) -> None:
+        expected = hashlib.sha256(b"only.txt\0alpha\nbeta\n\0").hexdigest()
+        with (
+            patch("scripts.actions_backend.subprocess.check_output", return_value="only.txt\0"),
+            patch.object(Path, "read_bytes", return_value=b"alpha\r\nbeta\r\n"),
+        ):
+            self.assertEqual(_control_plane_digest(), expected)
 
     def test_github_request_retries_tls_transport_failure(self) -> None:
         tls_failure = urllib.error.URLError("certificate verify failed")
@@ -785,6 +801,59 @@ class ActionsBackendTests(unittest.TestCase):
         receipt["selected_market_starts"] = [2_700, 1_800, 900]
         with self.assertRaisesRegex(RuntimeError, "exact usable minimum cover"):
             _validate_receipt_coverage(receipt, authority, [2_700, 1_800, 900])
+
+    def test_receipt_allows_only_fully_revalidated_zero_transfer_no_op(self) -> None:
+        authority = load_authority()
+        configured = _load_prior_canary_evidence(authority)
+        receipt = json.loads(Path("config/canary-receipt.json").read_bytes())
+        prior_starts = sorted(
+            {
+                int(start)
+                for proof in configured.values()
+                for start in proof["qualified_market_starts"]
+            }
+        )
+        receipt.update(
+            {
+                "prior_evidence_assets": sorted(asset.value for asset in authority.assets),
+                "invalidated_prior_evidence_assets": [],
+                "prior_release_tags": sorted(
+                    {str(proof["release_tag"]) for proof in configured.values()}
+                ),
+                "release_tags": [],
+                "executed_rounds": 0,
+                "qualified_market_starts": prior_starts,
+                "qualified_new_candidates": 0,
+                "qualified_candidates_total": len(prior_starts),
+                "gamma_requests": 144,
+                "source_head_requests": 0,
+                "shared_pmxt_objects": 0,
+                "shared_source_transfer_owners": 0,
+                "source_transfer_bytes": 0,
+                "canonical_bytes": 1,
+                "prior_remote_verification_bytes": 1,
+                "peak_rss_kib": 1,
+                "minimum_free_disk_bytes": 8_000_000_000,
+                "control_plane_sha256": "digest",
+            }
+        )
+        receipt_path = Mock()
+        receipt_path.exists.return_value = True
+        receipt_path.read_bytes.return_value = canonical_json_bytes(receipt)
+        with (
+            patch("scripts.actions_backend.CANARY_RECEIPT_PATH", receipt_path),
+            patch("scripts.actions_backend._control_plane_digest", return_value="digest"),
+        ):
+            self.assertEqual(_require_canary_receipt(authority)["executed_rounds"], 0)
+            receipt["gamma_requests"] = 143
+            receipt_path.read_bytes.return_value = canonical_json_bytes(receipt)
+            with self.assertRaisesRegex(RuntimeError, "does not authorize"):
+                _require_canary_receipt(authority)
+            receipt["gamma_requests"] = 144
+            receipt["source_head_requests"] = 1
+            receipt_path.read_bytes.return_value = canonical_json_bytes(receipt)
+            with self.assertRaisesRegex(RuntimeError, "does not authorize"):
+                _require_canary_receipt(authority)
 
     def test_canary_candidate_search_is_bounded(self) -> None:
         authority = replace(

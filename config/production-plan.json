@@ -33,20 +33,20 @@
     "unknown": "EXCLUDED with evidence"
   },
   "canary": {
-    "scope": "semantically revalidate authenticated v4/v5/v6 TIER_A proofs, then execute full UTC-day source-reused rounds only for uncovered HYPE unless authority drift returns another asset to search",
+    "scope": "semantically revalidate authenticated v4/v5/v6/v7 TIER_A proofs for all seven assets; execute full UTC-day source-reused rounds only for any asset invalidated by authority drift",
     "search": {
       "rounds": [
-        {"start": "2026-08-07T23:45:00Z", "end": "2026-08-07T00:00:00Z", "step_minutes": 15},
         {"start": "2026-08-05T23:45:00Z", "end": "2026-08-05T00:00:00Z", "step_minutes": 15},
         {"start": "2026-08-03T23:45:00Z", "end": "2026-08-03T00:00:00Z", "step_minutes": 15},
-        {"start": "2026-08-01T23:45:00Z", "end": "2026-08-01T00:00:00Z", "step_minutes": 15}
+        {"start": "2026-08-01T23:45:00Z", "end": "2026-08-01T00:00:00Z", "step_minutes": 15},
+        {"start": "2026-07-30T23:45:00Z", "end": "2026-07-30T00:00:00Z", "step_minutes": 15}
       ]
     },
     "limits": {
       "max_rounds": 4,
       "max_candidates_per_round": 96,
       "max_candidates_total": 384,
-      "max_gamma_requests_total": 2736,
+      "max_gamma_requests_total": 2832,
       "max_source_objects_total": 100,
       "max_source_transfer_bytes_total": 80000000000,
       "max_wall_seconds": 18000

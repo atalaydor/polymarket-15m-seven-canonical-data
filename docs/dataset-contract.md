@@ -18,7 +18,7 @@ digests. Published partitions are immutable.
 New Actions-discovery canary partitions use `polymarket-15m-seven-canary-v7-*` Releases. A bounded
 round may contain several declared 15-minute windows, but the receipt accepts only authenticated,
 identity-bound Tier A market rows and records the exact minimum window cover for all seven assets.
-Earlier v1/v2/v3/v4/v5/v6 canary Releases remain immutable isolated evidence. Authenticated v4/v5/v6 Tier A
+Earlier v1/v2/v3/v4/v5/v6 canary Releases remain immutable isolated evidence. Authenticated v4/v5/v6/v7 Tier A
 rows may be reused only after current Gamma matches their minimum authoritative semantic projection.
 Production partitions use
 `polymarket-15m-seven-v1-YYYY-MM-a|b` Releases and are the only authority considered by the full

@@ -55,8 +55,8 @@ CANARY_MAX_SOURCE_OBJECTS = 25
 CANARY_MAX_SOURCE_BYTES = 20_000_000_000
 CANARY_MAX_ROUNDS = 4
 CANARY_MAX_CANDIDATES_TOTAL = CANARY_MAX_CANDIDATES * CANARY_MAX_ROUNDS
-CANARY_PRIOR_CANDIDATES_PER_PROOF = 8
-CANARY_PRIOR_GAMMA_REQUESTS = 48
+CANARY_PRIOR_CANDIDATE_COUNTS = frozenset((8, 96))
+CANARY_PRIOR_GAMMA_REQUESTS = 144
 CANARY_MAX_GAMMA_REQUESTS_TOTAL = (
     CANARY_MAX_CANDIDATES_TOTAL * len(tuple(Asset)) + CANARY_PRIOR_GAMMA_REQUESTS
 )
@@ -281,7 +281,7 @@ def _load_prior_canary_evidence(authority: Authority) -> dict[Asset, dict[str, A
             asset in result
             or asset not in authority.assets
             or not isinstance(starts, list)
-            or len(starts) != CANARY_PRIOR_CANDIDATES_PER_PROOF
+            or len(starts) not in CANARY_PRIOR_CANDIDATE_COUNTS
             or len(starts) != len(set(starts))
             or any(not isinstance(start, int) or start % 900 for start in starts)
             or any(
@@ -291,7 +291,7 @@ def _load_prior_canary_evidence(authority: Authority) -> dict[Asset, dict[str, A
             or len({datetime.fromtimestamp(start, UTC).date() for start in starts}) != 1
             or partition
             != f"{asset.value}/15m/{datetime.fromtimestamp(starts[0], UTC).date().isoformat()}"
-            or re.match(r"polymarket-15m-seven-canary-v[456]-", release_tag) is None
+            or re.match(r"polymarket-15m-seven-canary-v[4567]-", release_tag) is None
             or re.fullmatch(r"[0-9a-f]{64}", str(proof.get("manifest_sha256", "")))
             is None
             or re.fullmatch(r"[0-9a-f]{40}", str(proof.get("tool_commit", ""))) is None
@@ -318,7 +318,9 @@ def _control_plane_digest() -> str:
         path = Path(name)
         digest.update(name.encode())
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        # Git's text checkout converts LF to CRLF on Windows. Bind the canonical
+        # tracked content, including local edits, independently of that conversion.
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -500,7 +502,18 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         or len(release_tags) != len(set(release_tags))
         or any(not str(tag).startswith(f"{CANARY_RELEASE_PREFIX}-") for tag in release_tags)
         or receipt.get("new_candidate_limit") != CANARY_MAX_CANDIDATES_TOTAL
-        or not 1 <= executed_rounds <= CANARY_MAX_ROUNDS
+        or not 0 <= executed_rounds <= CANARY_MAX_ROUNDS
+        or (
+            executed_rounds == 0
+            and (
+                prior_assets != set(authority.assets)
+                or invalidated_prior
+                or release_tags
+                or int(receipt.get("source_head_requests", 0)) != 0
+                or int(receipt.get("shared_pmxt_objects", 0)) != 0
+                or int(receipt.get("source_transfer_bytes", 0)) != 0
+            )
+        )
         or not executed_rounds
         <= int(receipt.get("qualified_new_candidates", 0))
         <= executed_rounds * CANARY_MAX_CANDIDATES
@@ -509,23 +522,38 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         or len(qualified_starts) != int(receipt.get("qualified_candidates_total", 0))
         or len(qualified_starts) != len(set(qualified_starts))
         or not set(qualified_starts).issubset(allowed_starts)
+        or bool(new_allowed_starts & prior_starts)
         or not 1 <= len(selected_starts) <= len(authority.assets)
         or not set(selected_starts).issubset(set(qualified_starts))
         or receipt.get("common_window") != (len(selected_starts) == 1)
         or set(asset_starts) != {asset.value for asset in authority.assets}
         or not set(asset_starts.values()).issubset(set(selected_starts))
-        or not 1 <= int(receipt.get("gamma_requests", 0)) <= CANARY_MAX_GAMMA_REQUESTS_TOTAL
-        or not 1
+        or not CANARY_PRIOR_GAMMA_REQUESTS
+        <= int(receipt.get("gamma_requests", 0))
+        <= CANARY_MAX_GAMMA_REQUESTS_TOTAL
+        or (
+            executed_rounds == 0
+            and int(receipt.get("gamma_requests", 0)) != CANARY_PRIOR_GAMMA_REQUESTS
+        )
+        or not 0
         <= int(receipt.get("source_head_requests", 0))
         <= CANARY_MAX_SOURCE_OBJECTS_TOTAL
         or receipt.get("shared_source_transfer_owners") != executed_rounds
-        or not 1
+        or not 0
         <= int(receipt.get("shared_pmxt_objects", 0))
         <= CANARY_MAX_SOURCE_OBJECTS_TOTAL
         or receipt.get("shared_pmxt_objects") != receipt.get("source_head_requests")
-        or not 1
+        or not 0
         <= int(receipt.get("source_transfer_bytes", 0))
         <= CANARY_MAX_SOURCE_BYTES_TOTAL
+        or (
+            executed_rounds > 0
+            and (
+                int(receipt.get("source_head_requests", 0)) < 1
+                or int(receipt.get("shared_pmxt_objects", 0)) < 1
+                or int(receipt.get("source_transfer_bytes", 0)) < 1
+            )
+        )
         or int(receipt.get("canonical_bytes", 0)) < 1
         or not 1
         <= int(receipt.get("prior_remote_verification_bytes", 0))
@@ -1483,6 +1511,13 @@ def command_canary() -> None:
     seen_conditions = {
         market.condition_id for markets in prior_markets.values() for market in markets
     }
+    fallback_starts = {
+        candidate
+        for round_authority in _adaptive_round_authorities(authority)
+        for candidate in _candidate_starts(round_authority)
+    }
+    if qualified_starts & fallback_starts:
+        raise RuntimeError("adaptive canary fallback overlaps reusable proof authority")
 
     for round_index, round_authority in enumerate(_adaptive_round_authorities(authority), 1):
         if not uncovered:
