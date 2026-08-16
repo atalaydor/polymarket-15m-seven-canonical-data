@@ -93,29 +93,42 @@ def enforce_shared_pmxt_asset_caps(
             raise SourceError("shared PMXT event is outside the bound market inventory")
         counts[asset] += 1
         market_counts[event.condition_id] = market_counts.get(event.condition_id, 0) + 1
-        if counts[asset] > PMXT_FILTERED_ROWS_PER_ASSET_OBJECT:
+    for asset, count in counts.items():
+        if count > PMXT_FILTERED_ROWS_PER_ASSET_OBJECT:
             raise ResourceLimitError(
                 f"PMXT filtered output for {asset.value} exceeds per-object asset cap "
-                f"({counts[asset]} > {PMXT_FILTERED_ROWS_PER_ASSET_OBJECT})"
+                f"({count} > {PMXT_FILTERED_ROWS_PER_ASSET_OBJECT})"
             )
-        if market_counts[event.condition_id] > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
+    for condition_id, count in market_counts.items():
+        if count > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
             raise ResourceLimitError(
-                "PMXT filtered output exceeds measured per-market capacity bound"
+                "PMXT filtered output exceeds measured per-market capacity bound "
+                f"(condition={condition_id}, rows={count}, "
+                f"bound={PMXT_ROWS_PER_MARKET_WITH_MARGIN})"
             )
-        if day_market_counts is not None:
-            day_market_counts[event.condition_id] = (
-                day_market_counts.get(event.condition_id, 0) + 1
-            )
-            if day_market_counts[event.condition_id] > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
+    if day_market_counts is not None:
+        for condition_id, count in market_counts.items():
+            projected = day_market_counts.get(condition_id, 0) + count
+            if projected > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
                 raise ResourceLimitError(
-                    "PMXT filtered output exceeds measured per-market daily capacity bound"
+                    "PMXT filtered output exceeds measured per-market daily capacity bound "
+                    f"(condition={condition_id}, rows={projected}, "
+                    f"bound={PMXT_ROWS_PER_MARKET_WITH_MARGIN})"
                 )
-        if day_asset_counts is not None:
-            day_asset_counts[asset] = day_asset_counts.get(asset, 0) + 1
-            if day_asset_counts[asset] > PMXT_FILTERED_ROWS_PER_ASSET_DAY:
+    if day_asset_counts is not None:
+        for asset, count in counts.items():
+            projected = day_asset_counts.get(asset, 0) + count
+            if projected > PMXT_FILTERED_ROWS_PER_ASSET_DAY:
                 raise ResourceLimitError(
-                    f"PMXT filtered output for {asset.value} exceeds per-day asset cap"
+                    f"PMXT filtered output for {asset.value} exceeds per-day asset cap "
+                    f"({projected} > {PMXT_FILTERED_ROWS_PER_ASSET_DAY})"
                 )
+    if day_market_counts is not None:
+        for condition_id, count in market_counts.items():
+            day_market_counts[condition_id] = day_market_counts.get(condition_id, 0) + count
+    if day_asset_counts is not None:
+        for asset, count in counts.items():
+            day_asset_counts[asset] = day_asset_counts.get(asset, 0) + count
     return counts
 
 

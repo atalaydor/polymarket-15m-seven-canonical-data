@@ -119,10 +119,12 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                 (event,), {Asset.DOGE: (doge,)}, day_markets, day_assets
             )
             self.assertEqual(day_assets, {Asset.DOGE: 2})
-            with self.assertRaises(ResourceLimitError):
+            with self.assertRaisesRegex(ResourceLimitError, "rows=3, bound=2"):
                 enforce_shared_pmxt_asset_caps(
                     (event,), {Asset.DOGE: (doge,)}, day_markets, day_assets
                 )
+            self.assertEqual(day_markets, {doge.condition_id: 2})
+            self.assertEqual(day_assets, {Asset.DOGE: 2})
 
     def test_hourly_source_intersects_at_most_eight_warm_market_windows(self) -> None:
         hour = datetime.fromtimestamp(START_NS / 1_000_000_000, UTC).replace(
