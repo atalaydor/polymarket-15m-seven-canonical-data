@@ -21,7 +21,7 @@ from helpers import START_S, market
 
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.errors import ResourceLimitError, SourceError, UnresolvedMarketError
-from canonical_data.inventory import SourceObject
+from canonical_data.inventory import SourceObject, pmxt_hourly_objects
 from canonical_data.models import Asset
 from canonical_data.sources import OfficialDiscovery
 from scripts.actions_backend import (
@@ -37,10 +37,12 @@ from scripts.actions_backend import (
     _adaptive_round_authorities,
     _candidate_starts,
     _execute_canary_round,
+    _load_prior_canary_evidence,
     _market_authority_projection,
     _pmxt_source_identity,
     _raise_child_failure,
     _request,
+    _revalidate_prior_canary_evidence,
     _validate_receipt_coverage,
     _verify_canary_dispositions,
     day_plan,
@@ -125,7 +127,7 @@ class ActionsBackendTests(unittest.TestCase):
         )
         self.assertEqual(authority.start, datetime(2026, 4, 13, 20, tzinfo=UTC))
         self.assertEqual(authority.cutoff, datetime(2026, 8, 10, 1, tzinfo=UTC))
-        self.assertEqual(authority.canary_search_start, datetime(2026, 7, 17, 19, 45, tzinfo=UTC))
+        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 4, 21, 45, tzinfo=UTC))
         candidates = _candidate_starts(authority)
         self.assertEqual(len(candidates), CANARY_MAX_CANDIDATES)
         self.assertEqual(len(_adaptive_round_authorities(authority)), CANARY_MAX_ROUNDS)
@@ -136,6 +138,11 @@ class ActionsBackendTests(unittest.TestCase):
         ]
         self.assertEqual(len(all_candidates), CANARY_MAX_CANDIDATES_TOTAL)
         self.assertEqual(len(all_candidates), len(set(all_candidates)))
+        prior = _load_prior_canary_evidence(authority)
+        self.assertEqual(set(prior), {Asset.BTC, Asset.ETH})
+        self.assertEqual(
+            sum(len(item["qualified_market_starts"]) for item in prior.values()), 16
+        )
 
     def test_production_entrypoints_use_import_safe_module_execution(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -619,6 +626,82 @@ class ActionsBackendTests(unittest.TestCase):
             [accepted.market_start_ns // 1_000_000_000],
         )
 
+    def test_prior_tier_a_reuse_requires_current_semantic_projection(self) -> None:
+        authority = load_authority()
+        start = 1_784_311_200
+        accepted = replace(
+            market(Asset.BTC),
+            event_id="prior-event",
+            market_id="prior-market",
+            condition_id="0x" + "a" * 64,
+            market_start_ns=start * 1_000_000_000,
+            market_end_ns=(start + 900) * 1_000_000_000,
+        )
+        binding = {
+            "authority_projection": _market_authority_projection(accepted),
+            "authority_sha256": hashlib.sha256(
+                canonical_json_bytes(_market_authority_projection(accepted))
+            ).hexdigest(),
+        }
+        configured = {
+            Asset.BTC: {
+                "asset": "BTC",
+                "release_tag": "prior-v4",
+                "partition_id": "BTC/15m/2026-07-17",
+                "manifest_sha256": "a" * 64,
+                "tool_commit": "b" * 40,
+                "qualified_market_starts": [start],
+            }
+        }
+        source_urls = [
+            source.url
+            for source in pmxt_hourly_objects(
+                (start - 3_600) * 1_000_000_000,
+                (start + 900) * 1_000_000_000,
+            )
+        ]
+        remote_proof = {
+            "bytes": 123,
+            "manifest_sha256": "a" * 64,
+            "tool_commit": "b" * 40,
+            "quality": "TIER_A",
+            "accepted_market_starts": [start],
+            "accepted_market_bindings": [binding],
+            "exclusions": 1,
+            "pmxt_urls": source_urls,
+            "authenticated_redownload": True,
+        }
+
+        class Gamma:
+            def __init__(self, selected: object) -> None:
+                self.selected = selected
+
+            def fetch_market(self, asset: Asset, candidate: int) -> tuple[object, bytes, str]:
+                return self.selected, b"payload", "https://gamma.test"
+
+        with (
+            patch("scripts.actions_backend._load_prior_canary_evidence", return_value=configured),
+            patch("scripts.actions_backend.remote_inventory", return_value={}),
+            patch("scripts.actions_backend.verify_remote_partition", return_value=remote_proof),
+            patch("scripts.actions_backend.GammaClient", return_value=Gamma(accepted)),
+        ):
+            reused = _revalidate_prior_canary_evidence(authority, time.monotonic() + 10)
+        self.assertEqual(set(reused["proofs"]), {Asset.BTC})
+        self.assertEqual(reused["invalidated"], ())
+
+        changed = replace(accepted, rules_text_sha256="c" * 64)
+        with (
+            patch("scripts.actions_backend._load_prior_canary_evidence", return_value=configured),
+            patch("scripts.actions_backend.remote_inventory", return_value={}),
+            patch("scripts.actions_backend.verify_remote_partition", return_value=remote_proof),
+            patch("scripts.actions_backend.GammaClient", return_value=Gamma(changed)),
+        ):
+            invalidated = _revalidate_prior_canary_evidence(
+                authority, time.monotonic() + 10
+            )
+        self.assertEqual(invalidated["proofs"], {})
+        self.assertEqual(invalidated["invalidated"], (Asset.BTC,))
+
     def test_receipt_recomputes_proof_bound_minimum_cover(self) -> None:
         authority = self.authority()
         first_assets = tuple(Asset)[:4]
@@ -656,6 +739,7 @@ class ActionsBackendTests(unittest.TestCase):
                     "manifest_sha256": "a" * 64,
                     "quality": "TIER_A",
                     "release_tag": "canary-proof",
+                    "tool_commit": "b" * 40,
                     "accepted_market_bindings": [binding(asset)],
                 }
                 for asset in authority.assets

@@ -1,29 +1,39 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "2.0.0",
   "accessed_at": "2026-08-16",
-  "asset": "BTC",
-  "timeframe": "15m",
-  "run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31914715144",
-  "release_tag": "polymarket-15m-seven-canary-v3-31914715144-1786319100-1786312800-2026-08-a",
-  "partition_id": "BTC/15m/2026-08-09",
-  "manifest_sha256": "554749b51547b769aea8a1011ca243519f56bed0d165a9185bd1f040c5450f16",
-  "tool_commit": "217df25db92ad1567ee0754fa65791792b644ed4",
-  "reuse_status": "INVALIDATED_INSUFFICIENT_SEMANTIC_PROJECTION",
-  "reuse_invalidated_by_run": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31917413125",
-  "qualified_markets": [
-    {"start": 1786312800, "gamma_sha256": "ad23048c265d84ce8fe43b1d474009d50af2e8bf15c2b713232bab8c86f7a9e5"},
-    {"start": 1786313700, "gamma_sha256": "34bc80ae3869bc350892c59b9e309e63278127e3d7153b0116da36fc0ade66ed"},
-    {"start": 1786314600, "gamma_sha256": "777ef33a7cef56b3b30b45d82bb67011cb8ba9c139b0c2ff59b9afe85712418e"},
-    {"start": 1786315500, "gamma_sha256": "728f2ce5e6f786bc245b0442ccd7520422cc9fb8dc366658c89b134484c86d57"},
-    {"start": 1786316400, "gamma_sha256": "98152c23957664ee615e77233eafef7daac896d81ccf8abe080ca5e7e1e8a639"},
-    {"start": 1786317300, "gamma_sha256": "2af97d3ddcb405dda214f419c018a35e853f04d10b539ce564cf5bfbe5ad3820"},
-    {"start": 1786318200, "gamma_sha256": "55937efe919ab07d9537b728ddf1f36aada39a603f40fe04b4f5fe6f43c2653b"},
-    {"start": 1786319100, "gamma_sha256": "4634feeac8fda64c2aa5622cf8a5e7b059b704522f02330124352fed3a1f07f6"}
-  ],
-  "accepted_market_starts": [1786312800, 1786313700, 1786315500, 1786316400, 1786317300, 1786319100],
-  "source_objects": [
-    {"url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T21.parquet", "byte_length": 552875673, "etag": "\"b2cd20b340ba96b99952030b4f6d47dd-66\""},
-    {"url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T22.parquet", "byte_length": 556866523, "etag": "\"71a50a8be1bcc6c411de818c10e317a7-67\""},
-    {"url": "https://r2v2.pmxt.dev/polymarket_orderbook_2026-08-09T23.parquet", "byte_length": 507501824, "etag": "\"49b3b199cc0253285a38108bf23f76a0-61\""}
+  "status": "ACTIVE_SEMANTIC_REVALIDATION_REQUIRED",
+  "run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31919920497",
+  "authenticated_manifest_reconciliation": {
+    "manifest_count": 25,
+    "accepted_markets": 7,
+    "excluded_markets": 193,
+    "exclusion_counts": {
+      "EVENT_CONFLICT": 122,
+      "SOURCE_GAP": 51,
+      "NO_INITIAL_SNAPSHOT": 20
+    },
+    "uncovered_asset_exclusion_counts": {
+      "EVENT_CONFLICT": 100,
+      "SOURCE_GAP": 43,
+      "NO_INITIAL_SNAPSHOT": 17
+    }
+  },
+  "proofs": [
+    {
+      "asset": "BTC",
+      "release_tag": "polymarket-15m-seven-canary-v4-31919920497-r1-1784317500-1784311200-2026-07-b",
+      "partition_id": "BTC/15m/2026-07-17",
+      "manifest_sha256": "d94543b640fe4e67c16528a4bbf4751217028caffe0c20c6eea722bde4155080",
+      "tool_commit": "4ae8a2ee0893e5e39a08d8fc1d5174f977f2180c",
+      "qualified_market_starts": [1784311200, 1784312100, 1784313000, 1784313900, 1784314800, 1784315700, 1784316600, 1784317500]
+    },
+    {
+      "asset": "ETH",
+      "release_tag": "polymarket-15m-seven-canary-v4-31919920497-r4-1778031900-1778025600-2026-05-a",
+      "partition_id": "ETH/15m/2026-05-06",
+      "manifest_sha256": "a2a4eb6fd6099d1e01a64916be0455ad75a4421a26b5c33a2a929174d8b7d884",
+      "tool_commit": "4ae8a2ee0893e5e39a08d8fc1d5174f977f2180c",
+      "qualified_market_starts": [1778025600, 1778026500, 1778027400, 1778028300, 1778029200, 1778030100, 1778031000, 1778031900]
+    }
   ]
 }

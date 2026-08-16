@@ -43,5 +43,8 @@ legitimate post-snapshot `EVENT_CONFLICT` results and one was a legitimate XRP `
 The authenticated matrix is frozen in `canary-v3-coverage-reconciliation.json`. Run 31917413125
 proved the v3 record retained only mutable whole-Gamma-payload hashes, not the historical minimum
 authoritative projection, so BTC reuse was invalidated rather than treating serialization drift as
-semantic drift. All assets use four source-reused, stratified, early-stopping v4 rounds. Production
-remains locked pending the receipt.
+semantic drift. Run 31919920497 then produced authenticated v4 Tier A evidence for BTC and ETH;
+all other v4 dispositions remained legitimate `EVENT_CONFLICT`, `SOURCE_GAP`, or
+`NO_INITIAL_SNAPSHOT` exclusions. The v5 controller revalidates the full minimum semantic
+projection of those Tier A rows and searches eight new source-reused, stratified rounds only for
+assets still uncovered. Production remains locked pending the receipt.

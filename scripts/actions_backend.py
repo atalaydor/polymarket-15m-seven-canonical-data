@@ -45,17 +45,21 @@ from scripts.run_backfill import (
 )
 
 API = f"https://api.github.com/repos/{REPOSITORY}"
-CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v4"
+CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v5"
 AUTHORITY_PATH = Path("config/production-plan.json")
 CANARY_RECEIPT_PATH = Path("config/canary-receipt.json")
+CANARY_PRIOR_EVIDENCE_PATH = Path("config/canary-prior-evidence.json")
 LEDGER_PATH = Path("config/backfill-ledger.json")
 CANARY_MAX_CANDIDATES = 8
 CANARY_MAX_GAMMA_REQUESTS = CANARY_MAX_CANDIDATES * len(tuple(Asset))
 CANARY_MAX_SOURCE_OBJECTS = 3
 CANARY_MAX_SOURCE_BYTES = 2_400_000_000
-CANARY_MAX_ROUNDS = 4
+CANARY_MAX_ROUNDS = 8
 CANARY_MAX_CANDIDATES_TOTAL = CANARY_MAX_CANDIDATES * CANARY_MAX_ROUNDS
-CANARY_MAX_GAMMA_REQUESTS_TOTAL = CANARY_MAX_CANDIDATES_TOTAL * len(tuple(Asset))
+CANARY_PRIOR_GAMMA_REQUESTS = 16
+CANARY_MAX_GAMMA_REQUESTS_TOTAL = (
+    CANARY_MAX_CANDIDATES_TOTAL * len(tuple(Asset)) + CANARY_PRIOR_GAMMA_REQUESTS
+)
 CANARY_MAX_SOURCE_OBJECTS_TOTAL = CANARY_MAX_SOURCE_OBJECTS * CANARY_MAX_ROUNDS
 CANARY_MAX_SOURCE_BYTES_TOTAL = CANARY_MAX_SOURCE_BYTES * CANARY_MAX_ROUNDS
 CANARY_MAX_WALL_SECONDS = 18_000
@@ -255,6 +259,52 @@ def load_authority(path: Path = AUTHORITY_PATH) -> Authority:
     return authority
 
 
+def _load_prior_canary_evidence(authority: Authority) -> dict[Asset, dict[str, Any]]:
+    raw = json.loads(CANARY_PRIOR_EVIDENCE_PATH.read_bytes())
+    proofs = raw.get("proofs")
+    if (
+        raw.get("schema_version") != "2.0.0"
+        or raw.get("status") != "ACTIVE_SEMANTIC_REVALIDATION_REQUIRED"
+        or not isinstance(proofs, list)
+        or not proofs
+    ):
+        raise RuntimeError("prior canary evidence is not active semantic authority")
+    result: dict[Asset, dict[str, Any]] = {}
+    for proof in proofs:
+        if not isinstance(proof, dict):
+            raise RuntimeError("prior canary evidence entry is malformed")
+        asset = Asset(str(proof.get("asset", "")))
+        starts = proof.get("qualified_market_starts")
+        partition = str(proof.get("partition_id", ""))
+        release_tag = str(proof.get("release_tag", ""))
+        if (
+            asset in result
+            or asset not in authority.assets
+            or not isinstance(starts, list)
+            or len(starts) != CANARY_MAX_CANDIDATES
+            or len(starts) != len(set(starts))
+            or any(not isinstance(start, int) or start % 900 for start in starts)
+            or any(
+                not int(authority.start.timestamp()) <= start < int(authority.cutoff.timestamp())
+                for start in starts
+            )
+            or len({datetime.fromtimestamp(start, UTC).date() for start in starts}) != 1
+            or partition
+            != f"{asset.value}/15m/{datetime.fromtimestamp(starts[0], UTC).date().isoformat()}"
+            or not release_tag.startswith("polymarket-15m-seven-canary-v4-")
+            or re.fullmatch(r"[0-9a-f]{64}", str(proof.get("manifest_sha256", "")))
+            is None
+            or re.fullmatch(r"[0-9a-f]{40}", str(proof.get("tool_commit", ""))) is None
+        ):
+            raise RuntimeError("prior canary evidence entry violates frozen identity bounds")
+        result[asset] = proof
+    if sum(len(item["qualified_market_starts"]) for item in result.values()) != (
+        CANARY_PRIOR_GAMMA_REQUESTS
+    ):
+        raise RuntimeError("prior canary Gamma revalidation budget is inconsistent")
+    return result
+
+
 def _full_plan(authority: Authority) -> list[dict[str, Any]]:
     final_day = (authority.cutoff - timedelta(microseconds=1)).date()
     return build_backfill_plan(authority.start.date(), final_day)
@@ -278,6 +328,11 @@ def _validate_receipt_coverage(
 ) -> None:
     usable_raw = receipt.get("usable_market_starts_by_asset")
     proofs_raw = receipt.get("remote_proofs")
+    proof_release_tags = {
+        str(tag)
+        for name in ("release_tags", "prior_release_tags")
+        for tag in receipt.get(name, [])
+    }
     selected = receipt.get("selected_market_starts")
     asset_selection = receipt.get("asset_market_starts")
     expected_assets = {asset.value for asset in authority.assets}
@@ -309,7 +364,8 @@ def _validate_receipt_coverage(
             or re.fullmatch(r"[0-9a-f]{64}", str(proof.get("manifest_sha256", ""))) is None
             or not isinstance(proof.get("release_tag"), str)
             or not proof["release_tag"]
-            or proof["release_tag"] not in receipt.get("release_tags", [])
+            or proof["release_tag"] not in proof_release_tags
+            or re.fullmatch(r"[0-9a-f]{40}", str(proof.get("tool_commit", ""))) is None
             or not isinstance(bindings, list)
             or len(bindings) != len(starts)
         ):
@@ -396,12 +452,29 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         or not isinstance(asset_starts, dict)
     ):
         raise RuntimeError("canary receipt has malformed coverage selection")
-    allowed_starts = {
+    new_allowed_starts = {
         candidate
         for round_authority in _adaptive_round_authorities(authority)
         for candidate in _candidate_starts(round_authority)
     }
+    configured_prior = _load_prior_canary_evidence(authority)
+    prior_assets_raw = receipt.get("prior_evidence_assets", [])
+    invalidated_prior_raw = receipt.get("invalidated_prior_evidence_assets", [])
+    if not isinstance(prior_assets_raw, list) or not isinstance(invalidated_prior_raw, list):
+        raise RuntimeError("canary receipt has malformed prior evidence disposition")
+    prior_assets = {Asset(value) for value in prior_assets_raw}
+    invalidated_prior = {Asset(value) for value in invalidated_prior_raw}
+    configured_prior_assets = set(configured_prior)
+    if not (prior_assets | invalidated_prior) <= configured_prior_assets:
+        raise RuntimeError("canary receipt cites unknown prior evidence")
+    prior_starts = {
+        int(start)
+        for asset in prior_assets
+        for start in configured_prior[asset]["qualified_market_starts"]
+    }
+    allowed_starts = new_allowed_starts | prior_starts
     release_tags = receipt.get("release_tags", [])
+    prior_release_tags = receipt.get("prior_release_tags", [])
     executed_rounds = int(receipt.get("executed_rounds", 0))
     if (
         receipt.get("status") != "PASSED"
@@ -414,7 +487,14 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         or receipt.get("usable_market_bindings") != len(authority.assets)
         or receipt.get("legitimate_exclusion_contract_checks") != len(authority.assets)
         or receipt.get("canary_release_prefix") != CANARY_RELEASE_PREFIX
-        or receipt.get("prior_evidence_assets") != []
+        or len(prior_assets_raw) != len(prior_assets)
+        or len(invalidated_prior_raw) != len(invalidated_prior)
+        or prior_assets & invalidated_prior
+        or (prior_assets | invalidated_prior) != configured_prior_assets
+        or not isinstance(prior_release_tags, list)
+        or len(prior_release_tags) != len(set(prior_release_tags))
+        or set(prior_release_tags)
+        != {str(configured_prior[asset]["release_tag"]) for asset in prior_assets}
         or not isinstance(release_tags, list)
         or len(release_tags) != executed_rounds
         or len(release_tags) != len(set(release_tags))
@@ -425,7 +505,7 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         <= int(receipt.get("qualified_new_candidates", 0))
         <= executed_rounds * CANARY_MAX_CANDIDATES
         or int(receipt.get("qualified_candidates_total", 0))
-        != int(receipt.get("qualified_new_candidates", 0))
+        != int(receipt.get("qualified_new_candidates", 0)) + len(prior_starts)
         or len(qualified_starts) != int(receipt.get("qualified_candidates_total", 0))
         or len(qualified_starts) != len(set(qualified_starts))
         or not set(qualified_starts).issubset(allowed_starts)
@@ -447,6 +527,9 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
         <= int(receipt.get("source_transfer_bytes", 0))
         <= CANARY_MAX_SOURCE_BYTES_TOTAL
         or int(receipt.get("canonical_bytes", 0)) < 1
+        or not 1
+        <= int(receipt.get("prior_remote_verification_bytes", 0))
+        <= int(receipt.get("canonical_bytes", 0))
         or receipt.get("isolated_from_production") is not True
         or float(receipt.get("timeout_margin_seconds", 0)) <= 3_600
         or int(receipt.get("peak_rss_kib", 0)) < 1
@@ -455,6 +538,16 @@ def _require_canary_receipt(authority: Authority) -> dict[str, Any]:
     ):
         raise RuntimeError("canary receipt does not authorize the frozen full plan")
     _validate_receipt_coverage(receipt, authority, qualified_starts)
+    proofs = cast(dict[str, dict[str, Any]], receipt["remote_proofs"])
+    for asset in prior_assets:
+        expected = configured_prior[asset]
+        proof = proofs.get(asset.value, {})
+        if (
+            proof.get("manifest_sha256") != expected["manifest_sha256"]
+            or proof.get("release_tag") != expected["release_tag"]
+            or proof.get("tool_commit") != expected["tool_commit"]
+        ):
+            raise RuntimeError("canary receipt changed reusable remote authority")
     return cast(dict[str, Any], receipt)
 
 
@@ -735,6 +828,112 @@ def verify_remote_partition(
             item["source_url"] for item in manifest["provenance"] if item["source_id"] == "pmxt_v2"
         ),
         "authenticated_redownload": bool(os.environ.get("GITHUB_TOKEN")),
+    }
+
+
+def _revalidate_prior_canary_evidence(
+    authority: Authority, deadline: float
+) -> dict[str, Any]:
+    configured = _load_prior_canary_evidence(authority)
+    tags = {str(item["release_tag"]) for item in configured.values()}
+    inventory = remote_inventory(exact_tags=tags)
+    gamma = GammaClient(fetch=_fetch_gamma)
+    proofs: dict[Asset, dict[str, Any]] = {}
+    markets: dict[Asset, tuple[Market, ...]] = {}
+    invalidated: list[Asset] = []
+    gamma_requests = 0
+    verified_bytes = 0
+    seen_market_ids: set[str] = set()
+    seen_conditions: set[str] = set()
+    for asset, expected in configured.items():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("prior evidence revalidation exhausted the canary wall bound")
+        partition = str(expected["partition_id"])
+        proof = verify_remote_partition(partition, inventory)
+        verified_bytes += int(proof["bytes"])
+        starts = tuple(int(start) for start in expected["qualified_market_starts"])
+        expected_urls = {
+            source.url
+            for source in pmxt_hourly_objects(
+                (min(starts) - 3_600) * 1_000_000_000,
+                (max(starts) + 900) * 1_000_000_000,
+            )
+        }
+        if (
+            proof["manifest_sha256"] != expected["manifest_sha256"]
+            or proof["tool_commit"] != expected["tool_commit"]
+            or proof["quality"] != "TIER_A"
+            or not proof["accepted_market_starts"]
+            or len(proof["accepted_market_starts"])
+            != len(set(proof["accepted_market_starts"]))
+            or len(proof["accepted_market_bindings"])
+            != len(proof["accepted_market_starts"])
+            or not set(proof["accepted_market_starts"]).issubset(set(starts))
+            or set(proof["pmxt_urls"]) != expected_urls
+            or proof["authenticated_redownload"] is not True
+        ):
+            raise RuntimeError("prior canary remote proof changed immutable authority")
+        current: list[Market] = []
+        current_market_ids: set[str] = set()
+        current_conditions: set[str] = set()
+        unresolved = False
+        for start in starts:
+            gamma_requests += 1
+            try:
+                market, _, _ = gamma.fetch_market(asset, start)
+            except (IdentityError, UnresolvedMarketError):
+                unresolved = True
+                break
+            if (
+                market.asset is not asset
+                or market.timeframe != "15m"
+                or market.market_start_ns != start * 1_000_000_000
+                or market.market_end_ns - market.market_start_ns != 900_000_000_000
+                or market.market_id in seen_market_ids
+                or market.market_id in current_market_ids
+                or market.condition_id in seen_conditions
+                or market.condition_id in current_conditions
+            ):
+                raise RuntimeError("prior Gamma authority violates exact unique 15m identity")
+            current.append(market)
+            current_market_ids.add(market.market_id)
+            current_conditions.add(market.condition_id)
+        if unresolved:
+            invalidated.append(asset)
+            continue
+        current_by_start = {
+            market.market_start_ns // 1_000_000_000: market for market in current
+        }
+        semantic_match = all(
+            binding["authority_projection"]
+            == _market_authority_projection(current_by_start[int(start)])
+            for start, binding in (
+                (
+                    int(binding["authority_projection"]["market_start_ns"])
+                    // 1_000_000_000,
+                    binding,
+                )
+                for binding in proof["accepted_market_bindings"]
+            )
+        )
+        if not semantic_match:
+            invalidated.append(asset)
+            continue
+        for market in current:
+            seen_market_ids.add(market.market_id)
+            seen_conditions.add(market.condition_id)
+        proofs[asset] = proof
+        markets[asset] = tuple(current)
+    if gamma_requests > CANARY_PRIOR_GAMMA_REQUESTS:
+        raise RuntimeError("prior canary exceeded its Gamma revalidation budget")
+    return {
+        "proofs": proofs,
+        "markets": markets,
+        "invalidated": tuple(invalidated),
+        "gamma_requests": gamma_requests,
+        "verified_bytes": verified_bytes,
+        "release_tags": {asset: str(configured[asset]["release_tag"]) for asset in proofs},
+        "configured": configured,
     }
 
 
@@ -1234,24 +1433,44 @@ def command_canary() -> None:
     deadline = began + CANARY_MAX_WALL_SECONDS
     disk_before = shutil.disk_usage(Path.cwd()).free
     production_before = remote_inventory()
+    prior = _revalidate_prior_canary_evidence(authority, deadline)
+    proofs_by_asset = cast(dict[Asset, dict[str, Any]], prior["proofs"])
+    reused_prior_assets = frozenset(proofs_by_asset)
+    prior_markets = cast(dict[Asset, tuple[Market, ...]], prior["markets"])
+    proof_tags = cast(dict[Asset, str], prior["release_tags"])
+    uncovered = tuple(asset for asset in authority.assets if asset not in proofs_by_asset)
     usable_by_start: dict[int, set[Asset]] = {}
-    proofs_by_asset: dict[Asset, dict[str, Any]] = {}
-    proof_tags: dict[Asset, str] = {}
-    uncovered = authority.assets
+    for asset, proof in proofs_by_asset.items():
+        for start in proof["accepted_market_starts"]:
+            usable_by_start.setdefault(int(start), set()).add(asset)
     release_tags: list[str] = []
-    gamma_requests = 0
+    prior_release_tags = sorted(set(proof_tags.values()))
+    gamma_requests = int(prior["gamma_requests"])
     source_requests = 0
     source_objects = 0
     source_bytes = 0
     source_owners = 0
-    canonical_bytes = 0
+    prior_remote_verification_bytes = int(prior["verified_bytes"])
+    canonical_bytes = prior_remote_verification_bytes
     minimum_free_disk = disk_before
     peak_rss_kib = 1
-    checked_exclusion_assets: set[Asset] = set()
+    checked_exclusion_assets = {
+        asset for asset, proof in proofs_by_asset.items() if int(proof["exclusions"]) > 0
+    }
     executed_rounds = 0
-    qualified_starts: set[int] = set()
-    seen_market_ids: set[str] = set()
-    seen_conditions: set[str] = set()
+    configured_prior = cast(dict[Asset, dict[str, Any]], prior["configured"])
+    qualified_starts = {
+        int(start)
+        for asset in proofs_by_asset
+        for start in configured_prior[asset]["qualified_market_starts"]
+    }
+    qualified_new_starts: set[int] = set()
+    seen_market_ids = {
+        market.market_id for markets in prior_markets.values() for market in markets
+    }
+    seen_conditions = {
+        market.condition_id for markets in prior_markets.values() for market in markets
+    }
 
     for round_index, round_authority in enumerate(_adaptive_round_authorities(authority), 1):
         if not uncovered:
@@ -1299,6 +1518,7 @@ def command_canary() -> None:
         peak_rss_kib = max(peak_rss_kib, int(result["peak_rss_kib"]))
         round_starts = {int(start) for start in result["starts"]}
         qualified_starts.update(round_starts)
+        qualified_new_starts.update(round_starts)
         for start in round_starts:
             usable_by_start.setdefault(start, set())
         for asset in uncovered:
@@ -1368,17 +1588,22 @@ def command_canary() -> None:
                     "accepted_market_bindings"
                 ],
                 "release_tag": proof_tags[asset],
+                "tool_commit": proofs_by_asset[asset]["tool_commit"],
             }
             for asset in authority.assets
         },
         "common_window": len(selected_starts) == 1,
         "release_tags": release_tags,
-        "prior_evidence_assets": [],
+        "prior_release_tags": prior_release_tags,
+        "prior_evidence_assets": sorted(asset.value for asset in reused_prior_assets),
+        "invalidated_prior_evidence_assets": sorted(
+            asset.value for asset in cast(tuple[Asset, ...], prior["invalidated"])
+        ),
         "executed_rounds": executed_rounds,
         "canary_release_prefix": CANARY_RELEASE_PREFIX,
         "isolated_from_production": True,
         "new_candidate_limit": CANARY_MAX_CANDIDATES_TOTAL,
-        "qualified_new_candidates": len(qualified_starts),
+        "qualified_new_candidates": len(qualified_new_starts),
         "qualified_candidates_total": len(qualified_starts),
         "gamma_requests": gamma_requests,
         "source_head_requests": source_requests,
@@ -1388,6 +1613,7 @@ def command_canary() -> None:
         "shared_source_transfer_owners": source_owners,
         "source_transfer_bytes": source_bytes,
         "canonical_bytes": canonical_bytes,
+        "prior_remote_verification_bytes": prior_remote_verification_bytes,
         "authenticated_no_op_partitions": len(proofs_by_asset),
         "legitimate_exclusion_contract_checks": len(checked_exclusion_assets),
         "unexplained_failures": 0,

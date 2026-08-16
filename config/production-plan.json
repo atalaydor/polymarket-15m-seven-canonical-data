@@ -20,7 +20,7 @@
   },
   "publication": {
     "release_prefix": "polymarket-15m-seven-v1",
-    "canary_release_prefix": "polymarket-15m-seven-canary-v4",
+    "canary_release_prefix": "polymarket-15m-seven-canary-v5",
     "grouping": "half_month",
     "maximum_assets_per_release": 672,
     "draft_first": true,
@@ -33,22 +33,26 @@
     "unknown": "EXCLUDED with evidence"
   },
   "canary": {
-    "scope": "execute stratified source-reused rounds only for uncovered assets until exact minimum cover; legacy whole-payload evidence is not reusable authority",
+    "scope": "semantically revalidate authenticated v4 TIER_A proofs, then execute new stratified source-reused rounds only for uncovered assets until exact minimum cover",
     "search": {
       "rounds": [
-        {"start": "2026-07-17T19:45:00Z", "end": "2026-07-17T18:00:00Z", "step_minutes": 15},
-        {"start": "2026-06-23T13:45:00Z", "end": "2026-06-23T12:00:00Z", "step_minutes": 15},
-        {"start": "2026-05-30T07:45:00Z", "end": "2026-05-30T06:00:00Z", "step_minutes": 15},
-        {"start": "2026-05-06T01:45:00Z", "end": "2026-05-06T00:00:00Z", "step_minutes": 15}
+        {"start": "2026-08-04T21:45:00Z", "end": "2026-08-04T20:00:00Z", "step_minutes": 15},
+        {"start": "2026-07-25T09:45:00Z", "end": "2026-07-25T08:00:00Z", "step_minutes": 15},
+        {"start": "2026-07-05T15:45:00Z", "end": "2026-07-05T14:00:00Z", "step_minutes": 15},
+        {"start": "2026-06-15T21:45:00Z", "end": "2026-06-15T20:00:00Z", "step_minutes": 15},
+        {"start": "2026-06-05T03:45:00Z", "end": "2026-06-05T02:00:00Z", "step_minutes": 15},
+        {"start": "2026-05-21T09:45:00Z", "end": "2026-05-21T08:00:00Z", "step_minutes": 15},
+        {"start": "2026-05-01T15:45:00Z", "end": "2026-05-01T14:00:00Z", "step_minutes": 15},
+        {"start": "2026-04-18T21:45:00Z", "end": "2026-04-18T20:00:00Z", "step_minutes": 15}
       ]
     },
     "limits": {
-      "max_rounds": 4,
+      "max_rounds": 8,
       "max_candidates_per_round": 8,
-      "max_candidates_total": 32,
-      "max_gamma_requests_total": 224,
-      "max_source_objects_total": 12,
-      "max_source_transfer_bytes_total": 9600000000,
+      "max_candidates_total": 64,
+      "max_gamma_requests_total": 464,
+      "max_source_objects_total": 24,
+      "max_source_transfer_bytes_total": 19200000000,
       "max_wall_seconds": 18000
     },
     "full_plan_unlock": "committed config/canary-receipt.json with PASSED status"
