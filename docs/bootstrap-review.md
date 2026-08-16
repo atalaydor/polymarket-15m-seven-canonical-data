@@ -50,4 +50,7 @@ projection of those Tier A rows and searches eight new source-reused, stratified
 assets still uncovered. Run 31923100373 added authenticated Tier A evidence for XRP, SOL, and DOGE;
 its remaining BNB/HYPE results were legitimate `EVENT_CONFLICT`, `SOURCE_GAP`, or
 `NO_INITIAL_SNAPSHOT` exclusions. The v6 controller revalidates all five proofs and searches up to
-12 later-period source-reused rounds only for BNB/HYPE. Production remains locked pending the receipt.
+12 later-period source-reused rounds only for BNB/HYPE. Run 31924347931 added authenticated BNB
+Tier A evidence; HYPE remained legitimately excluded by 55 `EVENT_CONFLICT` and 41 `SOURCE_GAP`
+dispositions. The v7 controller revalidates all six proofs and searches up to four complete,
+source-active UTC days only for HYPE. Production remains locked pending the receipt.

@@ -127,7 +127,7 @@ class ActionsBackendTests(unittest.TestCase):
         )
         self.assertEqual(authority.start, datetime(2026, 4, 13, 20, tzinfo=UTC))
         self.assertEqual(authority.cutoff, datetime(2026, 8, 10, 1, tzinfo=UTC))
-        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 8, 1, 45, tzinfo=UTC))
+        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 7, 23, 45, tzinfo=UTC))
         candidates = _candidate_starts(authority)
         self.assertEqual(len(candidates), CANARY_MAX_CANDIDATES)
         self.assertEqual(len(_adaptive_round_authorities(authority)), CANARY_MAX_ROUNDS)
@@ -140,10 +140,11 @@ class ActionsBackendTests(unittest.TestCase):
         self.assertEqual(len(all_candidates), len(set(all_candidates)))
         prior = _load_prior_canary_evidence(authority)
         self.assertEqual(
-            set(prior), {Asset.BTC, Asset.ETH, Asset.SOL, Asset.XRP, Asset.DOGE}
+            set(prior),
+            {Asset.BTC, Asset.ETH, Asset.SOL, Asset.XRP, Asset.DOGE, Asset.BNB},
         )
         self.assertEqual(
-            sum(len(item["qualified_market_starts"]) for item in prior.values()), 40
+            sum(len(item["qualified_market_starts"]) for item in prior.values()), 48
         )
 
     def test_production_entrypoints_use_import_safe_module_execution(self) -> None:
@@ -603,6 +604,15 @@ class ActionsBackendTests(unittest.TestCase):
         self.assertEqual(minimum_canary_cover({3: first, 2: second, 1: first}), (3, 2))
         with self.assertRaisesRegex(RuntimeError, "no usable evidence cover"):
             minimum_canary_cover({3: frozenset(tuple(Asset)[:-1])})
+
+    def test_canary_cover_ignores_full_day_empty_starts_with_deterministic_tie(
+        self,
+    ) -> None:
+        usable = {start: frozenset[Asset]() for start in range(10_000, 10_096)}
+        usable[9_000] = frozenset(tuple(Asset)[:4])
+        usable[8_000] = frozenset(tuple(Asset)[4:])
+        usable[7_000] = frozenset(tuple(Asset)[4:])
+        self.assertEqual(minimum_canary_cover(usable), (9_000, 8_000))
 
     def test_remote_exclusion_is_a_disposition_but_not_usable_coverage(self) -> None:
         accepted = replace(market(Asset.BTC), market_id="accepted")

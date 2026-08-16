@@ -18,7 +18,6 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from itertools import combinations
 from pathlib import Path
 from typing import Any, cast
 
@@ -45,18 +44,19 @@ from scripts.run_backfill import (
 )
 
 API = f"https://api.github.com/repos/{REPOSITORY}"
-CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v6"
+CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v7"
 AUTHORITY_PATH = Path("config/production-plan.json")
 CANARY_RECEIPT_PATH = Path("config/canary-receipt.json")
 CANARY_PRIOR_EVIDENCE_PATH = Path("config/canary-prior-evidence.json")
 LEDGER_PATH = Path("config/backfill-ledger.json")
-CANARY_MAX_CANDIDATES = 8
+CANARY_MAX_CANDIDATES = 96
 CANARY_MAX_GAMMA_REQUESTS = CANARY_MAX_CANDIDATES * len(tuple(Asset))
-CANARY_MAX_SOURCE_OBJECTS = 3
-CANARY_MAX_SOURCE_BYTES = 2_400_000_000
-CANARY_MAX_ROUNDS = 12
+CANARY_MAX_SOURCE_OBJECTS = 25
+CANARY_MAX_SOURCE_BYTES = 20_000_000_000
+CANARY_MAX_ROUNDS = 4
 CANARY_MAX_CANDIDATES_TOTAL = CANARY_MAX_CANDIDATES * CANARY_MAX_ROUNDS
-CANARY_PRIOR_GAMMA_REQUESTS = 40
+CANARY_PRIOR_CANDIDATES_PER_PROOF = 8
+CANARY_PRIOR_GAMMA_REQUESTS = 48
 CANARY_MAX_GAMMA_REQUESTS_TOTAL = (
     CANARY_MAX_CANDIDATES_TOTAL * len(tuple(Asset)) + CANARY_PRIOR_GAMMA_REQUESTS
 )
@@ -281,7 +281,7 @@ def _load_prior_canary_evidence(authority: Authority) -> dict[Asset, dict[str, A
             asset in result
             or asset not in authority.assets
             or not isinstance(starts, list)
-            or len(starts) != CANARY_MAX_CANDIDATES
+            or len(starts) != CANARY_PRIOR_CANDIDATES_PER_PROOF
             or len(starts) != len(set(starts))
             or any(not isinstance(start, int) or start % 900 for start in starts)
             or any(
@@ -291,7 +291,7 @@ def _load_prior_canary_evidence(authority: Authority) -> dict[Asset, dict[str, A
             or len({datetime.fromtimestamp(start, UTC).date() for start in starts}) != 1
             or partition
             != f"{asset.value}/15m/{datetime.fromtimestamp(starts[0], UTC).date().isoformat()}"
-            or re.match(r"polymarket-15m-seven-canary-v[45]-", release_tag) is None
+            or re.match(r"polymarket-15m-seven-canary-v[456]-", release_tag) is None
             or re.fullmatch(r"[0-9a-f]{64}", str(proof.get("manifest_sha256", "")))
             is None
             or re.fullmatch(r"[0-9a-f]{40}", str(proof.get("tool_commit", ""))) is None
@@ -1222,13 +1222,25 @@ def minimum_canary_cover(
     usable_by_start: dict[int, frozenset[Asset]],
     required_assets: tuple[Asset, ...] = tuple(Asset),
 ) -> tuple[int, ...]:
-    required = frozenset(required_assets)
-    starts = sorted(usable_by_start, reverse=True)
-    for size in range(1, len(starts) + 1):
-        for selected in combinations(starts, size):
-            covered = frozenset().union(*(usable_by_start[start] for start in selected))
-            if covered == required:
-                return selected
+    if not required_assets or len(required_assets) != len(set(required_assets)):
+        raise RuntimeError("canary cover requires a non-empty unique asset scope")
+    bit_by_asset = {asset: 1 << index for index, asset in enumerate(required_assets)}
+    required_mask = (1 << len(required_assets)) - 1
+    best_by_mask: dict[int, tuple[int, ...]] = {0: ()}
+    for start in sorted(usable_by_start, reverse=True):
+        mask = sum(bit_by_asset.get(asset, 0) for asset in usable_by_start[start])
+        if not mask:
+            continue
+        for covered, selected in tuple(best_by_mask.items()):
+            combined = covered | mask
+            candidate = (*selected, start)
+            existing = best_by_mask.get(combined)
+            if existing is None or len(candidate) < len(existing) or (
+                len(candidate) == len(existing) and candidate > existing
+            ):
+                best_by_mask[combined] = candidate
+    if required_mask in best_by_mask:
+        return best_by_mask[required_mask]
     raise RuntimeError("bounded canary candidates provide no usable evidence cover")
 
 

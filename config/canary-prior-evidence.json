@@ -4,6 +4,7 @@
   "status": "ACTIVE_SEMANTIC_REVALIDATION_REQUIRED",
   "run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31919920497",
   "additional_run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31923100373",
+  "latest_run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31924347931",
   "v4_authenticated_manifest_reconciliation": {
     "manifest_count": 25,
     "accepted_markets": 7,
@@ -32,6 +33,19 @@
       "EVENT_CONFLICT": 60,
       "SOURCE_GAP": 25,
       "NO_INITIAL_SNAPSHOT": 43
+    }
+  },
+  "v6_authenticated_manifest_reconciliation": {
+    "manifest_count": 14,
+    "accepted_markets": 1,
+    "excluded_markets": 111,
+    "exclusion_counts": {
+      "EVENT_CONFLICT": 70,
+      "SOURCE_GAP": 41
+    },
+    "remaining_hype_exclusion_counts": {
+      "EVENT_CONFLICT": 55,
+      "SOURCE_GAP": 41
     }
   },
   "proofs": [
@@ -74,6 +88,14 @@
       "manifest_sha256": "63e17bf6ab23979c9ace8ea7180df11fa1a044bbe230875bafe21be4df5b6680",
       "tool_commit": "a619a1c19186af3acfe65d9a427e00e1241a2064",
       "qualified_market_starts": [1783260000, 1783260900, 1783261800, 1783262700, 1783263600, 1783264500, 1783265400, 1783266300]
+    },
+    {
+      "asset": "BNB",
+      "release_tag": "polymarket-15m-seven-canary-v6-31924347931-r2-1785995100-1785988800-2026-08-a",
+      "partition_id": "BNB/15m/2026-08-06",
+      "manifest_sha256": "5d1e83699c01380e5fb1c31c6bd1d0a3d4d1db1835dca987fbf5daef124ea34a",
+      "tool_commit": "b595e608a9656230fed936ff057d03562b5d7688",
+      "qualified_market_starts": [1785988800, 1785989700, 1785990600, 1785991500, 1785992400, 1785993300, 1785994200, 1785995100]
     }
   ]
 }

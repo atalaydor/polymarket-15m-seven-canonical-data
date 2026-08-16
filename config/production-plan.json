@@ -20,7 +20,7 @@
   },
   "publication": {
     "release_prefix": "polymarket-15m-seven-v1",
-    "canary_release_prefix": "polymarket-15m-seven-canary-v6",
+    "canary_release_prefix": "polymarket-15m-seven-canary-v7",
     "grouping": "half_month",
     "maximum_assets_per_release": 672,
     "draft_first": true,
@@ -33,30 +33,22 @@
     "unknown": "EXCLUDED with evidence"
   },
   "canary": {
-    "scope": "semantically revalidate authenticated v4/v5 TIER_A proofs, then execute later-period source-reused rounds only for uncovered BNB/HYPE unless authority drift returns another asset to search",
+    "scope": "semantically revalidate authenticated v4/v5/v6 TIER_A proofs, then execute full UTC-day source-reused rounds only for uncovered HYPE unless authority drift returns another asset to search",
     "search": {
       "rounds": [
-        {"start": "2026-08-08T01:45:00Z", "end": "2026-08-08T00:00:00Z", "step_minutes": 15},
-        {"start": "2026-08-06T05:45:00Z", "end": "2026-08-06T04:00:00Z", "step_minutes": 15},
-        {"start": "2026-08-02T09:45:00Z", "end": "2026-08-02T08:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-30T13:45:00Z", "end": "2026-07-30T12:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-28T17:45:00Z", "end": "2026-07-28T16:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-23T21:45:00Z", "end": "2026-07-23T20:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-20T01:45:00Z", "end": "2026-07-20T00:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-15T05:45:00Z", "end": "2026-07-15T04:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-12T09:45:00Z", "end": "2026-07-12T08:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-09T13:45:00Z", "end": "2026-07-09T12:00:00Z", "step_minutes": 15},
-        {"start": "2026-07-02T17:45:00Z", "end": "2026-07-02T16:00:00Z", "step_minutes": 15},
-        {"start": "2026-06-27T21:45:00Z", "end": "2026-06-27T20:00:00Z", "step_minutes": 15}
+        {"start": "2026-08-07T23:45:00Z", "end": "2026-08-07T00:00:00Z", "step_minutes": 15},
+        {"start": "2026-08-05T23:45:00Z", "end": "2026-08-05T00:00:00Z", "step_minutes": 15},
+        {"start": "2026-08-03T23:45:00Z", "end": "2026-08-03T00:00:00Z", "step_minutes": 15},
+        {"start": "2026-08-01T23:45:00Z", "end": "2026-08-01T00:00:00Z", "step_minutes": 15}
       ]
     },
     "limits": {
-      "max_rounds": 12,
-      "max_candidates_per_round": 8,
-      "max_candidates_total": 96,
-      "max_gamma_requests_total": 712,
-      "max_source_objects_total": 36,
-      "max_source_transfer_bytes_total": 28800000000,
+      "max_rounds": 4,
+      "max_candidates_per_round": 96,
+      "max_candidates_total": 384,
+      "max_gamma_requests_total": 2736,
+      "max_source_objects_total": 100,
+      "max_source_transfer_bytes_total": 80000000000,
       "max_wall_seconds": 18000
     },
     "full_plan_unlock": "committed config/canary-receipt.json with PASSED status"
