@@ -47,4 +47,7 @@ semantic drift. Run 31919920497 then produced authenticated v4 Tier A evidence f
 all other v4 dispositions remained legitimate `EVENT_CONFLICT`, `SOURCE_GAP`, or
 `NO_INITIAL_SNAPSHOT` exclusions. The v5 controller revalidates the full minimum semantic
 projection of those Tier A rows and searches eight new source-reused, stratified rounds only for
-assets still uncovered. Production remains locked pending the receipt.
+assets still uncovered. Run 31923100373 added authenticated Tier A evidence for XRP, SOL, and DOGE;
+its remaining BNB/HYPE results were legitimate `EVENT_CONFLICT`, `SOURCE_GAP`, or
+`NO_INITIAL_SNAPSHOT` exclusions. The v6 controller revalidates all five proofs and searches up to
+12 later-period source-reused rounds only for BNB/HYPE. Production remains locked pending the receipt.

@@ -127,7 +127,7 @@ class ActionsBackendTests(unittest.TestCase):
         )
         self.assertEqual(authority.start, datetime(2026, 4, 13, 20, tzinfo=UTC))
         self.assertEqual(authority.cutoff, datetime(2026, 8, 10, 1, tzinfo=UTC))
-        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 4, 21, 45, tzinfo=UTC))
+        self.assertEqual(authority.canary_search_start, datetime(2026, 8, 8, 1, 45, tzinfo=UTC))
         candidates = _candidate_starts(authority)
         self.assertEqual(len(candidates), CANARY_MAX_CANDIDATES)
         self.assertEqual(len(_adaptive_round_authorities(authority)), CANARY_MAX_ROUNDS)
@@ -139,9 +139,11 @@ class ActionsBackendTests(unittest.TestCase):
         self.assertEqual(len(all_candidates), CANARY_MAX_CANDIDATES_TOTAL)
         self.assertEqual(len(all_candidates), len(set(all_candidates)))
         prior = _load_prior_canary_evidence(authority)
-        self.assertEqual(set(prior), {Asset.BTC, Asset.ETH})
         self.assertEqual(
-            sum(len(item["qualified_market_starts"]) for item in prior.values()), 16
+            set(prior), {Asset.BTC, Asset.ETH, Asset.SOL, Asset.XRP, Asset.DOGE}
+        )
+        self.assertEqual(
+            sum(len(item["qualified_market_starts"]) for item in prior.values()), 40
         )
 
     def test_production_entrypoints_use_import_safe_module_execution(self) -> None:

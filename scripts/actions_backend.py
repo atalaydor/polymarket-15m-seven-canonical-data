@@ -45,7 +45,7 @@ from scripts.run_backfill import (
 )
 
 API = f"https://api.github.com/repos/{REPOSITORY}"
-CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v5"
+CANARY_RELEASE_PREFIX = "polymarket-15m-seven-canary-v6"
 AUTHORITY_PATH = Path("config/production-plan.json")
 CANARY_RECEIPT_PATH = Path("config/canary-receipt.json")
 CANARY_PRIOR_EVIDENCE_PATH = Path("config/canary-prior-evidence.json")
@@ -54,9 +54,9 @@ CANARY_MAX_CANDIDATES = 8
 CANARY_MAX_GAMMA_REQUESTS = CANARY_MAX_CANDIDATES * len(tuple(Asset))
 CANARY_MAX_SOURCE_OBJECTS = 3
 CANARY_MAX_SOURCE_BYTES = 2_400_000_000
-CANARY_MAX_ROUNDS = 8
+CANARY_MAX_ROUNDS = 12
 CANARY_MAX_CANDIDATES_TOTAL = CANARY_MAX_CANDIDATES * CANARY_MAX_ROUNDS
-CANARY_PRIOR_GAMMA_REQUESTS = 16
+CANARY_PRIOR_GAMMA_REQUESTS = 40
 CANARY_MAX_GAMMA_REQUESTS_TOTAL = (
     CANARY_MAX_CANDIDATES_TOTAL * len(tuple(Asset)) + CANARY_PRIOR_GAMMA_REQUESTS
 )
@@ -291,7 +291,7 @@ def _load_prior_canary_evidence(authority: Authority) -> dict[Asset, dict[str, A
             or len({datetime.fromtimestamp(start, UTC).date() for start in starts}) != 1
             or partition
             != f"{asset.value}/15m/{datetime.fromtimestamp(starts[0], UTC).date().isoformat()}"
-            or not release_tag.startswith("polymarket-15m-seven-canary-v4-")
+            or re.match(r"polymarket-15m-seven-canary-v[45]-", release_tag) is None
             or re.fullmatch(r"[0-9a-f]{64}", str(proof.get("manifest_sha256", "")))
             is None
             or re.fullmatch(r"[0-9a-f]{40}", str(proof.get("tool_commit", ""))) is None

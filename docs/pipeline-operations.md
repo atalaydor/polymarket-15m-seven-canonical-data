@@ -3,16 +3,16 @@
 The workflow exposes only `canary` and `full-backfill` dispatch modes. Do not dispatch full backfill
 until the canary has committed `config/canary-receipt.json`; the planner also enforces this lock.
 
-The adaptive canary first redownloads and authenticates the v4 BTC and ETH Tier A partitions, then
+The adaptive canary first redownloads and authenticates the v4/v5 BTC, ETH, SOL, XRP, and DOGE Tier A partitions, then
 requires current Gamma to match each accepted row's complete minimum semantic projection. Drift or
 unresolved authority invalidates reuse and returns that asset to search. The remaining assets run
-through at most eight new, stratified eight-window rounds across previously untested source-reuse
+through at most 12 new, later-period eight-window rounds across previously untested source-reuse
 days and UTC phases. Each round completes Gamma identity/rules/outcome binding and three PMXT HEAD
 checks before one shared source acquisition. An asset leaves the search after its first authenticated
 Tier A partition. The controller stops on complete coverage and computes the exact minimum cover
-across prior and new proofs; exclusions never count. Aggregate bounds are 64 new candidates, 464
-Gamma requests including 16 prior-proof revalidations, 24 source objects, 19.2 GB transferred, and
-five hours. Each new round publishes to its own isolated v5 namespace; v4 remains immutable.
+across prior and new proofs; exclusions never count. Aggregate bounds are 96 new candidates, 712
+Gamma requests including 40 prior-proof revalidations, 36 source objects, 28.8 GB transferred, and
+five hours. Each new round publishes to its own isolated v6 namespace; v4/v5 remain immutable.
 
 Full execution is one UTC day per job. Before doing work, the executor reconciles production Release
 assets, rejects anomalies, and selects only unfinished assets. Each successful asset publication is

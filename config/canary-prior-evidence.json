@@ -3,7 +3,8 @@
   "accessed_at": "2026-08-16",
   "status": "ACTIVE_SEMANTIC_REVALIDATION_REQUIRED",
   "run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31919920497",
-  "authenticated_manifest_reconciliation": {
+  "additional_run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31923100373",
+  "v4_authenticated_manifest_reconciliation": {
     "manifest_count": 25,
     "accepted_markets": 7,
     "excluded_markets": 193,
@@ -16,6 +17,21 @@
       "EVENT_CONFLICT": 100,
       "SOURCE_GAP": 43,
       "NO_INITIAL_SNAPSHOT": 17
+    }
+  },
+  "v5_authenticated_manifest_reconciliation": {
+    "manifest_count": 23,
+    "accepted_markets": 3,
+    "excluded_markets": 181,
+    "exclusion_counts": {
+      "EVENT_CONFLICT": 111,
+      "SOURCE_GAP": 27,
+      "NO_INITIAL_SNAPSHOT": 43
+    },
+    "remaining_bnb_hype_exclusion_counts": {
+      "EVENT_CONFLICT": 60,
+      "SOURCE_GAP": 25,
+      "NO_INITIAL_SNAPSHOT": 43
     }
   },
   "proofs": [
@@ -34,6 +50,30 @@
       "manifest_sha256": "a2a4eb6fd6099d1e01a64916be0455ad75a4421a26b5c33a2a929174d8b7d884",
       "tool_commit": "4ae8a2ee0893e5e39a08d8fc1d5174f977f2180c",
       "qualified_market_starts": [1778025600, 1778026500, 1778027400, 1778028300, 1778029200, 1778030100, 1778031000, 1778031900]
+    },
+    {
+      "asset": "XRP",
+      "release_tag": "polymarket-15m-seven-canary-v5-31923100373-r1-1785879900-1785873600-2026-08-a",
+      "partition_id": "XRP/15m/2026-08-04",
+      "manifest_sha256": "484acf43f0d9559627e93954e4c9cd426e54b5ad78309dde0c0013081a10fc4c",
+      "tool_commit": "a619a1c19186af3acfe65d9a427e00e1241a2064",
+      "qualified_market_starts": [1785873600, 1785874500, 1785875400, 1785876300, 1785877200, 1785878100, 1785879000, 1785879900]
+    },
+    {
+      "asset": "SOL",
+      "release_tag": "polymarket-15m-seven-canary-v5-31923100373-r3-1783266300-1783260000-2026-07-a",
+      "partition_id": "SOL/15m/2026-07-05",
+      "manifest_sha256": "520ab25c21819484d934c3190a973ef6382fe46633fae30b9819f2c627a85424",
+      "tool_commit": "a619a1c19186af3acfe65d9a427e00e1241a2064",
+      "qualified_market_starts": [1783260000, 1783260900, 1783261800, 1783262700, 1783263600, 1783264500, 1783265400, 1783266300]
+    },
+    {
+      "asset": "DOGE",
+      "release_tag": "polymarket-15m-seven-canary-v5-31923100373-r3-1783266300-1783260000-2026-07-a",
+      "partition_id": "DOGE/15m/2026-07-05",
+      "manifest_sha256": "63e17bf6ab23979c9ace8ea7180df11fa1a044bbe230875bafe21be4df5b6680",
+      "tool_commit": "a619a1c19186af3acfe65d9a427e00e1241a2064",
+      "qualified_market_starts": [1783260000, 1783260900, 1783261800, 1783262700, 1783263600, 1783264500, 1783265400, 1783266300]
     }
   ]
 }
