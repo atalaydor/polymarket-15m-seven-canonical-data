@@ -33,7 +33,7 @@
     "unknown": "EXCLUDED with evidence"
   },
   "canary": {
-    "scope": "reuse authenticated per-asset proof, then execute stratified source-reused rounds only for uncovered assets until exact minimum cover",
+    "scope": "execute stratified source-reused rounds only for uncovered assets until exact minimum cover; legacy whole-payload evidence is not reusable authority",
     "search": {
       "rounds": [
         {"start": "2026-07-17T19:45:00Z", "end": "2026-07-17T18:00:00Z", "step_minutes": 15},
@@ -46,7 +46,7 @@
       "max_rounds": 4,
       "max_candidates_per_round": 8,
       "max_candidates_total": 32,
-      "max_gamma_requests_total": 200,
+      "max_gamma_requests_total": 224,
       "max_source_objects_total": 12,
       "max_source_transfer_bytes_total": 9600000000,
       "max_wall_seconds": 18000

@@ -40,6 +40,8 @@ GitHub Actions: eight candidates share one bounded source bundle, fresh Gamma ev
 PMXT HEADs, and authenticated Tier A rows select a common window or the exact minimum multi-window
 cover. Run 31914715144 then found BTC Tier A evidence, but 47 of the 48 non-BTC dispositions were
 legitimate post-snapshot `EVENT_CONFLICT` results and one was a legitimate XRP `SOURCE_GAP`.
-The authenticated matrix is frozen in `canary-v3-coverage-reconciliation.json`. BTC's exact v3 proof
-is reused only after fresh Gamma and remote-partition revalidation; uncovered assets use four
-source-reused, stratified, early-stopping v4 rounds. Production remains locked pending the receipt.
+The authenticated matrix is frozen in `canary-v3-coverage-reconciliation.json`. Run 31917413125
+proved the v3 record retained only mutable whole-Gamma-payload hashes, not the historical minimum
+authoritative projection, so BTC reuse was invalidated rather than treating serialization drift as
+semantic drift. All assets use four source-reused, stratified, early-stopping v4 rounds. Production
+remains locked pending the receipt.

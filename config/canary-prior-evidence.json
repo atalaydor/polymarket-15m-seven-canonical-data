@@ -8,6 +8,8 @@
   "partition_id": "BTC/15m/2026-08-09",
   "manifest_sha256": "554749b51547b769aea8a1011ca243519f56bed0d165a9185bd1f040c5450f16",
   "tool_commit": "217df25db92ad1567ee0754fa65791792b644ed4",
+  "reuse_status": "INVALIDATED_INSUFFICIENT_SEMANTIC_PROJECTION",
+  "reuse_invalidated_by_run": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31917413125",
   "qualified_markets": [
     {"start": 1786312800, "gamma_sha256": "ad23048c265d84ce8fe43b1d474009d50af2e8bf15c2b713232bab8c86f7a9e5"},
     {"start": 1786313700, "gamma_sha256": "34bc80ae3869bc350892c59b9e309e63278127e3d7153b0116da36fc0ade66ed"},

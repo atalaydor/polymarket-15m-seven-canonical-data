@@ -19,8 +19,9 @@ from unittest.mock import Mock, patch
 
 from helpers import START_S, market
 
+from canonical_data.audit import canonical_json_bytes
 from canonical_data.errors import ResourceLimitError, SourceError, UnresolvedMarketError
-from canonical_data.inventory import SourceObject, pmxt_hourly_objects
+from canonical_data.inventory import SourceObject
 from canonical_data.models import Asset
 from canonical_data.sources import OfficialDiscovery
 from scripts.actions_backend import (
@@ -36,12 +37,12 @@ from scripts.actions_backend import (
     _adaptive_round_authorities,
     _candidate_starts,
     _execute_canary_round,
+    _market_authority_projection,
     _pmxt_source_identity,
     _raise_child_failure,
     _request,
     _validate_receipt_coverage,
     _verify_canary_dispositions,
-    _verify_prior_canary_evidence,
     day_plan,
     inventory_anomalies,
     load_authority,
@@ -324,85 +325,24 @@ class ActionsBackendTests(unittest.TestCase):
         self.assertEqual(result.gamma_requests, 2)
         self.assertEqual([asset for asset, _ in result.candidates[0].markets], requested)
 
-    def test_prior_btc_proof_is_reused_only_after_authoritative_revalidation(self) -> None:
-        starts = [1_786_312_800 + offset * 900 for offset in range(8)]
-        payloads = {start: f"gamma-{start}".encode() for start in starts}
-        qualified = [
-            {
-                "start": start,
-                "gamma_sha256": hashlib.sha256(payloads[start]).hexdigest(),
-            }
-            for start in starts
-        ]
-        raw = {
-            "schema_version": "1.0.0",
-            "accessed_at": "2026-08-16",
-            "asset": "BTC",
-            "timeframe": "15m",
-            "run_url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31914715144",
-            "partition_id": "BTC/15m/2026-08-09",
-            "release_tag": "polymarket-15m-seven-canary-v3-proof",
-            "manifest_sha256": "a" * 64,
-            "tool_commit": "b" * 40,
-            "qualified_markets": qualified,
-            "accepted_market_starts": starts[:2],
-            "source_objects": [
-                {
-                    "url": source.url,
-                    "byte_length": 1,
-                    "etag": '"x"',
-                }
-                for source in pmxt_hourly_objects(
-                    (min(starts) - 3_600) * 1_000_000_000,
-                    (max(starts) + 900) * 1_000_000_000,
-                )
-            ],
-        }
-        authority = Authority(
-            datetime.fromtimestamp(min(starts) - 900, UTC),
-            datetime.fromtimestamp(max(starts) + 1_800, UTC),
-            tuple(Asset),
-            datetime.fromtimestamp(starts[-1], UTC),
-            datetime.fromtimestamp(starts[0], UTC),
-            15,
+    def test_market_authority_projection_ignores_payload_noise_but_binds_semantics(self) -> None:
+        selected = market(Asset.BTC)
+        first_payload = {"market": selected.market_id, "updatedAt": "one", "volume": 10}
+        second_payload = {"volume": 99, "updatedAt": "two", "market": selected.market_id}
+        projection = _market_authority_projection(selected)
+        digest = hashlib.sha256(canonical_json_bytes(projection)).hexdigest()
+        self.assertNotEqual(
+            hashlib.sha256(canonical_json_bytes(first_payload)).hexdigest(),
+            hashlib.sha256(canonical_json_bytes(second_payload)).hexdigest(),
         )
-
-        class FakeGamma:
-            def __init__(self, *args: object, **kwargs: object) -> None:
-                pass
-
-            def fetch_market(self, asset: Asset, start: int) -> tuple[object, bytes, str]:
-                fixture = replace(
-                    market(asset),
-                    market_id=f"BTC-{start}",
-                    condition_id=f"0x{start:064x}",
-                    market_start_ns=start * 1_000_000_000,
-                    market_end_ns=(start + 900) * 1_000_000_000,
-                )
-                return fixture, payloads[start], f"https://example.test/gamma/{start}"
-
-        proof = {
-            "quality": "TIER_A",
-            "manifest_sha256": "a" * 64,
-            "tool_commit": "b" * 40,
-            "accepted_market_starts": starts[:2],
-            "authenticated_redownload": True,
-        }
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "prior.json"
-            path.write_text(json.dumps(raw), encoding="utf-8")
-            with (
-                patch("scripts.actions_backend.GammaClient", FakeGamma),
-                patch("scripts.actions_backend.remote_inventory", return_value={}),
-                patch("scripts.actions_backend.verify_remote_partition", return_value=proof),
-            ):
-                reused, candidates, requests, tag = _verify_prior_canary_evidence(
-                    authority, path
-                )
-        self.assertIs(reused, proof)
-        self.assertEqual(len(candidates), 8)
-        self.assertEqual(requests, 8)
-        self.assertEqual(tag, raw["release_tag"])
+        self.assertEqual(digest, hashlib.sha256(canonical_json_bytes(projection)).hexdigest())
+        changed_rules = _market_authority_projection(
+            replace(selected, rules_text_sha256="f" * 64)
+        )
+        self.assertNotEqual(
+            digest,
+            hashlib.sha256(canonical_json_bytes(changed_rules)).hexdigest(),
+        )
 
     def test_multi_window_execution_acquires_one_shared_source_bundle(self) -> None:
         day = datetime.fromtimestamp(START_S, UTC).date()
@@ -663,16 +603,7 @@ class ActionsBackendTests(unittest.TestCase):
             market_start_ns=accepted.market_start_ns + 900_000_000_000,
             market_end_ns=accepted.market_end_ns + 900_000_000_000,
         )
-        accepted_rows = [
-            {
-                "market_id": accepted.market_id,
-                "condition_id": accepted.condition_id,
-                "token_up": accepted.token_up,
-                "token_down": accepted.token_down,
-                "market_start_ns": accepted.market_start_ns,
-                "quality_tier": "TIER_A",
-            }
-        ]
+        accepted_rows = [{**_market_authority_projection(accepted), "quality_tier": "TIER_A"}]
         excluded_rows = [
             {
                 "market_id": excluded.market_id,
@@ -691,7 +622,31 @@ class ActionsBackendTests(unittest.TestCase):
     def test_receipt_recomputes_proof_bound_minimum_cover(self) -> None:
         authority = self.authority()
         first_assets = tuple(Asset)[:4]
-        usable = {asset.value: [3] if asset in first_assets else [2] for asset in authority.assets}
+        usable = {
+            asset.value: [2_700] if asset in first_assets else [1_800]
+            for asset in authority.assets
+        }
+
+        def binding(asset: Asset) -> dict[str, object]:
+            start = usable[asset.value][0]
+            selected = replace(
+                market(asset),
+                event_id=f"event-{asset.value}-{start}",
+                market_id=f"{asset.value}-{start}",
+                condition_id="0x" + f"{tuple(Asset).index(asset):064x}",
+                token_up=str(tuple(Asset).index(asset) * 2 + 1),
+                token_down=str(tuple(Asset).index(asset) * 2 + 2),
+                market_start_ns=start * 1_000_000_000,
+                market_end_ns=(start + 900) * 1_000_000_000,
+            )
+            projection = _market_authority_projection(selected)
+            return {
+                "authority_projection": projection,
+                "authority_sha256": hashlib.sha256(
+                    canonical_json_bytes(projection)
+                ).hexdigest(),
+            }
+
         receipt = {
             "release_tags": ["canary-proof"],
             "usable_market_starts_by_asset": usable,
@@ -701,45 +656,39 @@ class ActionsBackendTests(unittest.TestCase):
                     "manifest_sha256": "a" * 64,
                     "quality": "TIER_A",
                     "release_tag": "canary-proof",
-                    "accepted_market_bindings": [
-                        {
-                            "market_id": f"{asset.value}-{usable[asset.value][0]}",
-                            "condition_id": "0x" + f"{tuple(Asset).index(asset):064x}",
-                            "token_ids": [
-                                str(tuple(Asset).index(asset) * 2 + 1),
-                                str(tuple(Asset).index(asset) * 2 + 2),
-                            ],
-                            "market_start": usable[asset.value][0],
-                            "official_outcome": "UP",
-                            "resolution_source_url": "https://data.chain.link/streams/example",
-                        }
-                    ],
+                    "accepted_market_bindings": [binding(asset)],
                 }
                 for asset in authority.assets
             },
-            "selected_market_starts": [3, 2],
+            "selected_market_starts": [2_700, 1_800],
             "asset_market_starts": {
                 asset.value: usable[asset.value][0] for asset in authority.assets
             },
         }
-        _validate_receipt_coverage(receipt, authority, [3, 2, 1])
+        _validate_receipt_coverage(receipt, authority, [2_700, 1_800, 900])
         altered = json.loads(json.dumps(receipt))
         altered["remote_proofs"]["BTC"]["accepted_market_bindings"][0][
+            "authority_projection"
+        ][
             "condition_id"
         ] = "not-a-condition"
         with self.assertRaisesRegex(RuntimeError, "market identity binding"):
-            _validate_receipt_coverage(altered, authority, [3, 2, 1])
+            _validate_receipt_coverage(altered, authority, [2_700, 1_800, 900])
         reused = json.loads(json.dumps(receipt))
         reused["remote_proofs"]["ETH"]["accepted_market_bindings"][0][
+            "authority_projection"
+        ][
             "condition_id"
         ] = reused["remote_proofs"]["BTC"]["accepted_market_bindings"][0][
+            "authority_projection"
+        ][
             "condition_id"
         ]
         with self.assertRaisesRegex(RuntimeError, "market identity binding"):
-            _validate_receipt_coverage(reused, authority, [3, 2, 1])
-        receipt["selected_market_starts"] = [3, 2, 1]
+            _validate_receipt_coverage(reused, authority, [2_700, 1_800, 900])
+        receipt["selected_market_starts"] = [2_700, 1_800, 900]
         with self.assertRaisesRegex(RuntimeError, "exact usable minimum cover"):
-            _validate_receipt_coverage(receipt, authority, [3, 2, 1])
+            _validate_receipt_coverage(receipt, authority, [2_700, 1_800, 900])
 
     def test_canary_candidate_search_is_bounded(self) -> None:
         authority = replace(
