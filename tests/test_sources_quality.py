@@ -42,6 +42,7 @@ from scripts.run_backfill import (
     PMXT_FILTERED_ROWS_PER_ASSET_DAY,
     PMXT_FILTERED_ROWS_PER_ASSET_OBJECT,
     PMXT_MARKETS_PER_ASSET_OBJECT,
+    PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN,
     PMXT_ROWS_PER_MARKET_WITH_MARGIN,
     _markets_relevant_to_source,
     _restore_shared_pmxt_counts,
@@ -81,18 +82,19 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                 )
 
     def test_pmxt_capacity_is_measured_and_cumulative_without_shared_multiplication(self) -> None:
-        self.assertEqual(PMXT_ROWS_PER_MARKET_WITH_MARGIN, 690_393)
+        self.assertEqual(PMXT_ROWS_PER_MARKET_WITH_MARGIN, 950_535)
+        self.assertEqual(PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN, 690_393)
         self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_OBJECT, 5_523_144)
-        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_DAY, 66_277_728)
+        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_DAY, 91_251_360)
         configured = json.loads(Path("config/pipeline.json").read_bytes())["resource_limits"]
-        self.assertEqual(configured["max_pmxt_filtered_rows_per_market"], 690_393)
+        self.assertEqual(configured["max_pmxt_filtered_rows_per_market"], 950_535)
         self.assertEqual(
             configured["max_pmxt_filtered_rows_per_object_per_asset"], 5_523_144
         )
         self.assertEqual(
-            configured["max_pmxt_filtered_rows_per_day_per_asset"], 66_277_728
+            configured["max_pmxt_filtered_rows_per_day_per_asset"], 91_251_360
         )
-        self.assertEqual(configured["max_pmxt_rows_per_partition"], 66_277_728)
+        self.assertEqual(configured["max_pmxt_rows_per_partition"], 91_251_360)
         doge = market(Asset.DOGE)
         event = BookEvent(
             condition_id=doge.condition_id,
@@ -125,6 +127,14 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                 )
             self.assertEqual(day_markets, {doge.condition_id: 2})
             self.assertEqual(day_assets, {Asset.DOGE: 2})
+        with (
+            mock.patch("scripts.run_backfill.PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN", 1),
+            mock.patch("scripts.run_backfill.PMXT_ROWS_PER_MARKET_WITH_MARGIN", 2),
+            self.assertRaisesRegex(ResourceLimitError, "rows=2, bound=1"),
+        ):
+            enforce_shared_pmxt_asset_caps(
+                (event, event), {Asset.DOGE: (doge,)}, {}, {Asset.DOGE: 0}
+            )
 
     def test_hourly_source_intersects_at_most_eight_warm_market_windows(self) -> None:
         hour = datetime.fromtimestamp(START_NS / 1_000_000_000, UTC).replace(

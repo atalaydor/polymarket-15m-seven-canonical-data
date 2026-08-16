@@ -30,9 +30,16 @@
     "measured_adaptive_run": {
       "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31918682089",
       "condition_id": "0x2fbca10b166ef777ba93551e6e7ccddc17d1f1dc7ce1971e15c6092ead63a613",
-      "causal_rows": 552314,
+      "object_fragment_rows": 552314,
       "old_bound": 405113,
-      "classification": "legitimate authoritative workload exceeded a single-market estimate"
+      "classification": "legitimate authoritative hourly fragment exceeded a single-market estimate"
+    },
+    "measured_adaptive_cumulative_run": {
+      "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31918931139",
+      "condition_id": "0x2fbca10b166ef777ba93551e6e7ccddc17d1f1dc7ce1971e15c6092ead63a613",
+      "complete_causal_rows": 760428,
+      "old_bound": 690393,
+      "classification": "legitimate authoritative market inventory accumulated across two source objects"
     },
     "runner_capacity": {
       "url": "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
@@ -44,16 +51,18 @@
     }
   },
   "derivation": {
-    "measured_max_rows_per_market": 552314,
+    "measured_max_rows_per_market_object": 552314,
+    "max_rows_per_market_object": 690393,
+    "measured_max_rows_per_market": 760428,
     "safety_margin_numerator": 5,
     "safety_margin_denominator": 4,
-    "max_rows_per_market": 690393,
+    "max_rows_per_market": 950535,
     "warmup_seconds": 3600,
     "market_seconds": 900,
     "market_step_seconds": 900,
     "max_relevant_markets_per_hourly_object": 8,
     "max_rows_per_asset_object": 5523144,
     "max_markets_per_asset_day": 96,
-    "max_rows_per_asset_day_partition": 66277728
+    "max_rows_per_asset_day_partition": 91251360
   }
 }

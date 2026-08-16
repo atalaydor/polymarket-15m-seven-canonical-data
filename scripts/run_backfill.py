@@ -41,15 +41,19 @@ REPOSITORY = "atalaydor/polymarket-15m-seven-canonical-data"
 DATASET_RELEASE_PREFIX = "polymarket-15m-seven-v1"
 RETRY_DELAYS = (2, 8, 32)
 TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
-# Run 31918682089 measured 552,314 native rows for one authoritative market
-# across its complete causal reconstruction inventory. A 25% margin covers
-# expected market variance; the interval geometry bounds one hourly object to
+# Runs 31918682089/31918931139 measured 552,314 rows in one hourly fragment
+# and 760,428 rows across the complete causal inventory of one market. A 25%
+# margin covers expected market variance; one hourly object intersects at most
 # eight 15m markets when one hour of causal warm-up is retained.
-PMXT_MEASURED_ROWS_PER_MARKET = 552_314
+PMXT_MEASURED_ROWS_PER_MARKET_OBJECT = 552_314
+PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN = (
+    PMXT_MEASURED_ROWS_PER_MARKET_OBJECT * 5 + 3
+) // 4
+PMXT_MEASURED_ROWS_PER_MARKET = 760_428
 PMXT_ROWS_PER_MARKET_WITH_MARGIN = (PMXT_MEASURED_ROWS_PER_MARKET * 5 + 3) // 4
 PMXT_MARKETS_PER_ASSET_OBJECT = 8
 PMXT_FILTERED_ROWS_PER_ASSET_OBJECT = (
-    PMXT_ROWS_PER_MARKET_WITH_MARGIN * PMXT_MARKETS_PER_ASSET_OBJECT
+    PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN * PMXT_MARKETS_PER_ASSET_OBJECT
 )
 PMXT_FILTERED_ROWS_PER_ASSET_DAY = PMXT_ROWS_PER_MARKET_WITH_MARGIN * 96
 MAX_SOURCE_OBJECT_BYTES = 800_000_000
@@ -100,11 +104,11 @@ def enforce_shared_pmxt_asset_caps(
                 f"({count} > {PMXT_FILTERED_ROWS_PER_ASSET_OBJECT})"
             )
     for condition_id, count in market_counts.items():
-        if count > PMXT_ROWS_PER_MARKET_WITH_MARGIN:
+        if count > PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN:
             raise ResourceLimitError(
-                "PMXT filtered output exceeds measured per-market capacity bound "
+                "PMXT filtered output exceeds measured per-market object capacity bound "
                 f"(condition={condition_id}, rows={count}, "
-                f"bound={PMXT_ROWS_PER_MARKET_WITH_MARGIN})"
+                f"bound={PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN})"
             )
     if day_market_counts is not None:
         for condition_id, count in market_counts.items():

@@ -74,7 +74,7 @@ class BuiltPartition:
 @dataclass(frozen=True)
 class PipelineLimits:
     max_markets: int = 300
-    max_pmxt_rows: int = 66_277_728
+    max_pmxt_rows: int = 91_251_360
     max_samples: int = 1_000_000
     max_underlying_rows: int = 1_000_000
     max_partition_bytes: int = 1_000_000_000
