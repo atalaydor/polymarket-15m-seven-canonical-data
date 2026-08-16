@@ -27,6 +27,13 @@
       "exact_count_recoverable": false,
       "reason": "the inherited guard raised on the first excess row without asset or count diagnostics"
     },
+    "measured_adaptive_run": {
+      "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/31918682089",
+      "condition_id": "0x2fbca10b166ef777ba93551e6e7ccddc17d1f1dc7ce1971e15c6092ead63a613",
+      "causal_rows": 552314,
+      "old_bound": 405113,
+      "classification": "legitimate authoritative workload exceeded a single-market estimate"
+    },
     "runner_capacity": {
       "url": "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
       "label": "ubuntu-24.04 public repository",
@@ -37,16 +44,16 @@
     }
   },
   "derivation": {
-    "measured_max_rows_per_market": 324090,
+    "measured_max_rows_per_market": 552314,
     "safety_margin_numerator": 5,
     "safety_margin_denominator": 4,
-    "max_rows_per_market": 405113,
+    "max_rows_per_market": 690393,
     "warmup_seconds": 3600,
     "market_seconds": 900,
     "market_step_seconds": 900,
     "max_relevant_markets_per_hourly_object": 8,
-    "max_rows_per_asset_object": 3240904,
+    "max_rows_per_asset_object": 5523144,
     "max_markets_per_asset_day": 96,
-    "max_rows_per_asset_day_partition": 38890848
+    "max_rows_per_asset_day_partition": 66277728
   }
 }

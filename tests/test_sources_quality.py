@@ -81,18 +81,18 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                 )
 
     def test_pmxt_capacity_is_measured_and_cumulative_without_shared_multiplication(self) -> None:
-        self.assertEqual(PMXT_ROWS_PER_MARKET_WITH_MARGIN, 405_113)
-        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_OBJECT, 3_240_904)
-        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_DAY, 38_890_848)
+        self.assertEqual(PMXT_ROWS_PER_MARKET_WITH_MARGIN, 690_393)
+        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_OBJECT, 5_523_144)
+        self.assertEqual(PMXT_FILTERED_ROWS_PER_ASSET_DAY, 66_277_728)
         configured = json.loads(Path("config/pipeline.json").read_bytes())["resource_limits"]
-        self.assertEqual(configured["max_pmxt_filtered_rows_per_market"], 405_113)
+        self.assertEqual(configured["max_pmxt_filtered_rows_per_market"], 690_393)
         self.assertEqual(
-            configured["max_pmxt_filtered_rows_per_object_per_asset"], 3_240_904
+            configured["max_pmxt_filtered_rows_per_object_per_asset"], 5_523_144
         )
         self.assertEqual(
-            configured["max_pmxt_filtered_rows_per_day_per_asset"], 38_890_848
+            configured["max_pmxt_filtered_rows_per_day_per_asset"], 66_277_728
         )
-        self.assertEqual(configured["max_pmxt_rows_per_partition"], 38_890_848)
+        self.assertEqual(configured["max_pmxt_rows_per_partition"], 66_277_728)
         doge = market(Asset.DOGE)
         event = BookEvent(
             condition_id=doge.condition_id,

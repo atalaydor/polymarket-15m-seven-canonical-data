@@ -41,11 +41,11 @@ REPOSITORY = "atalaydor/polymarket-15m-seven-canonical-data"
 DATASET_RELEASE_PREFIX = "polymarket-15m-seven-v1"
 RETRY_DELAYS = (2, 8, 32)
 TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
-# Run 31902521041 measured 324,090 native rows for the busiest (BTC) market
-# across its complete two-object reconstruction inventory. A 25% margin covers
+# Run 31918682089 measured 552,314 native rows for one authoritative market
+# across its complete causal reconstruction inventory. A 25% margin covers
 # expected market variance; the interval geometry bounds one hourly object to
 # eight 15m markets when one hour of causal warm-up is retained.
-PMXT_MEASURED_ROWS_PER_MARKET = 324_090
+PMXT_MEASURED_ROWS_PER_MARKET = 552_314
 PMXT_ROWS_PER_MARKET_WITH_MARGIN = (PMXT_MEASURED_ROWS_PER_MARKET * 5 + 3) // 4
 PMXT_MARKETS_PER_ASSET_OBJECT = 8
 PMXT_FILTERED_ROWS_PER_ASSET_OBJECT = (

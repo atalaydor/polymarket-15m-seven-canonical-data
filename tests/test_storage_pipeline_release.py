@@ -395,7 +395,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(evidence["gap_total_ns"], 2_000_000_000)
 
     def test_partition_resource_caps_fail_before_work(self) -> None:
-        self.assertEqual(PipelineLimits().max_pmxt_rows, 38_890_848)
+        self.assertEqual(PipelineLimits().max_pmxt_rows, 66_277_728)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             limits = PipelineLimits(max_markets=0)
