@@ -1078,13 +1078,16 @@ def _raise_child_failure(completed: subprocess.CompletedProcess[str]) -> None:
     raise RuntimeError(f"15m executor failed with exit code {completed.returncode}")
 
 
-def command_execute_day(day_text: str) -> None:
+def command_execute_day(day_text: str, expected_release_group: str | None = None) -> None:
     authority = load_authority()
     _require_canary_receipt(authority)
     day = date.fromisoformat(day_text)
     plan_for_day = [item for item in _full_plan(authority) if item["day"] == day_text]
     if not plan_for_day:
         raise RuntimeError("requested UTC day is outside the frozen plan")
+    release_groups = {str(item["release_group"]) for item in plan_for_day}
+    if expected_release_group is not None and release_groups != {expected_release_group}:
+        raise RuntimeError("requested recovery release group does not match the frozen plan")
     inventory = remote_inventory()
     anomalies = inventory_anomalies(inventory, authority)
     if _fatal_inventory_anomalies(anomalies):
@@ -1719,6 +1722,7 @@ def main() -> None:
     commands.add_parser("checkpoint")
     day = commands.add_parser("execute-day")
     day.add_argument("--day", required=True)
+    day.add_argument("--expected-release-group")
     args = parser.parse_args()
     if args.command == "plan":
         command_plan()
@@ -1731,7 +1735,7 @@ def main() -> None:
     elif args.command == "checkpoint":
         command_checkpoint()
     else:
-        command_execute_day(args.day)
+        command_execute_day(args.day, args.expected_release_group)
 
 
 if __name__ == "__main__":

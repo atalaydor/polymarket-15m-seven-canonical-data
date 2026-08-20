@@ -56,8 +56,10 @@ def offline_audit(root: Path | None = None) -> dict[str, Any]:
     limits = pipeline["resource_limits"]
     if limits["max_transformed_partition_bytes"] != 1_000_000_000:
         errors.append("transformed partition cap changed")
-    if limits["minimum_free_disk_bytes"] < 8_000_000_000:
-        errors.append("disk headroom weakened")
+    # Two maximum source objects plus two maximum transformed partitions require
+    # 3.6 GB; the rounded 4 GB floor is the fail-closed runaway reserve.
+    if limits["minimum_free_disk_bytes"] < 4_000_000_000:
+        errors.append("disk runaway reserve weakened")
     if limits["minimum_available_memory_bytes"] < 2_000_000_000:
         errors.append("memory headroom weakened")
     if production["dataset_id"] != "polymarket-15m-seven-v1":

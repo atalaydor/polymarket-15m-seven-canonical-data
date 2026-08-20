@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import pickle
+import sqlite3
 import tempfile
 import unittest
 import urllib.error
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -184,6 +187,63 @@ class PipelineTests(unittest.TestCase):
                     ),
                     market().market_end_ns,
                 )
+
+
+    def test_compact_spool_is_lossless_and_avoids_duplicate_condition_index(self) -> None:
+        decoded = decode_rows(pmxt_rows(), "https://example.test/hour.parquet")
+        with tempfile.TemporaryDirectory() as temp:
+            spool_path = Path(temp) / "events.sqlite"
+            with EventSpool(spool_path) as spool:
+                spool.append(decoded)
+                self.assertEqual(spool.load(market().condition_id), decoded)
+                indexes = {
+                    str(row[1])
+                    for row in spool.connection.execute("PRAGMA index_list(events)")
+                }
+                self.assertNotIn("events_condition", indexes)
+                self.assertEqual(
+                    {
+                        str(row[1])
+                        for row in spool.connection.execute("PRAGMA table_info(events)")
+                    },
+                    {"condition_key", "source_key", "source_row", "payload"},
+                )
+
+    def test_exact_legacy_disk_failure_shape_is_materially_reduced(self) -> None:
+        base = decode_rows(pmxt_rows(), "https://example.test/hour.parquet")[1]
+        events = [replace(base, source_row=index) for index in range(4_000)]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            compact_path = root / "compact.sqlite"
+            with EventSpool(compact_path) as compact:
+                compact.append(events)
+                compact_bytes = compact.storage_bytes()
+
+            legacy_path = root / "legacy.sqlite"
+            legacy = sqlite3.connect(legacy_path)
+            with legacy:
+                legacy.execute(
+                    "CREATE TABLE events (condition_id TEXT NOT NULL, "
+                    "source_object TEXT NOT NULL, payload BLOB NOT NULL)"
+                )
+                legacy.executemany(
+                    "INSERT INTO events(condition_id,source_object,payload) VALUES (?,?,?)",
+                    (
+                        (
+                            event.condition_id,
+                            event.source_object,
+                            sqlite3.Binary(pickle.dumps(event, protocol=5)),
+                        )
+                        for event in events
+                    ),
+                )
+                legacy.execute("CREATE INDEX events_condition ON events(condition_id)")
+            page_count = int(legacy.execute("PRAGMA page_count").fetchone()[0])
+            page_size = int(legacy.execute("PRAGMA page_size").fetchone()[0])
+            legacy.close()
+            legacy_bytes = page_count * page_size
+
+            self.assertLess(compact_bytes * 2, legacy_bytes)
 
     def test_all_market_source_gaps_build_an_explicit_excluded_partition(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

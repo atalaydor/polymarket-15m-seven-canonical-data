@@ -12,7 +12,7 @@ on:
           - full-backfill
 
 concurrency:
-  group: polymarket-15m-seven-remote-authority
+  group: ${{ inputs.mode == 'canary' && 'polymarket-15m-seven-canary-authority' || 'polymarket-15m-seven-remote-authority' }}
   cancel-in-progress: false
 
 permissions: {}
@@ -83,8 +83,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: python -m pip install --disable-pip-version-check --no-cache-dir .
       - run: git pull --ff-only origin main
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir .
       - name: Execute unfinished assets with one shared daily source pass
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -101,8 +101,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: python -m pip install --disable-pip-version-check --no-cache-dir .
       - run: git pull --ff-only origin main
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir .
       - name: Serialize the aggregate remote-authority checkpoint
         env:
           GITHUB_TOKEN: ${{ github.token }}

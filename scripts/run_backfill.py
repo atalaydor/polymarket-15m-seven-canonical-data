@@ -62,7 +62,10 @@ PMXT_FILTERED_ROWS_PER_ASSET_OBJECT = (
 )
 PMXT_FILTERED_ROWS_PER_ASSET_DAY = PMXT_ROWS_PER_MARKET_WITH_MARGIN * 96
 MAX_SOURCE_OBJECT_BYTES = 800_000_000
-MINIMUM_FREE_DISK_BYTES = 8_000_000_000
+# With the compact condition-keyed spool there is no late index copy. This reserve
+# covers two simultaneous maximum source objects plus two maximum transformed
+# partitions; it is a runaway breaker, not a workload throttle.
+MINIMUM_FREE_DISK_BYTES = 4_000_000_000
 
 # These immutable hourly objects span every Polymarket condition; their identities
 # and observed absence are timeframe-neutral. The canary records fresh access.
@@ -246,7 +249,9 @@ def _acquire_with_retry(
         if delay:
             time.sleep(delay)
         try:
-            return BoundedAcquirer(raw_dir, max_object_bytes, 8_000_000_000).acquire(
+            return BoundedAcquirer(
+                raw_dir, max_object_bytes, MINIMUM_FREE_DISK_BYTES
+            ).acquire(
                 source,
                 expected_identity=stable_identity,
                 validator=_validate_pmxt_download,
@@ -360,6 +365,24 @@ def _validate_expected_source_identity(
         raise SourceError("acquired PMXT object does not match source-qualified identity")
 
 
+def _verify_shared_disk_margin(
+    shared: Path,
+    spool: EventSpool,
+    completed_sources: int,
+    source_bytes: int,
+) -> int:
+    usage = shutil.disk_usage(shared)
+    spool_bytes = spool.storage_bytes()
+    if usage.free < MINIMUM_FREE_DISK_BYTES:
+        raise ResourceLimitError(
+            "shared PMXT spool exhausted disk safety margin "
+            f"(free_bytes={usage.free}, required_free_bytes={MINIMUM_FREE_DISK_BYTES}, "
+            f"spool_bytes={spool_bytes}, completed_sources={completed_sources}, "
+            f"source_bytes={source_bytes}, disk_total_bytes={usage.total})"
+        )
+    return usage.free
+
+
 def prepare_shared_day(
     day: date,
     work_root: Path,
@@ -418,6 +441,7 @@ def prepare_shared_day(
             spool, markets_by_asset
         )
         spool.drop_index()
+        minimum_free_bytes = shutil.disk_usage(shared).free
         for source in source_objects:
             if source.url in state["completed_urls"]:
                 continue
@@ -479,9 +503,36 @@ def prepare_shared_day(
             state["source_bytes"] = int(state["source_bytes"]) + acquired.byte_length
             _atomic_json(state_path, state)
             acquired.path.unlink(missing_ok=True)
-            if shutil.disk_usage(shared).free < MINIMUM_FREE_DISK_BYTES:
-                raise ResourceLimitError("shared PMXT spool exhausted disk safety margin")
+            minimum_free_bytes = min(
+                minimum_free_bytes,
+                _verify_shared_disk_margin(
+                    shared,
+                    spool,
+                    len(state["completed_urls"]),
+                    int(state["source_bytes"]),
+                ),
+            )
         spool.ensure_index()
+        usage = shutil.disk_usage(shared)
+        print(
+            json.dumps(
+                {
+                    "storage_metrics": {
+                        "completed_sources": len(state["completed_urls"]),
+                        "disk_free_bytes": usage.free,
+                        "disk_total_bytes": usage.total,
+                        "minimum_free_bytes": minimum_free_bytes,
+                        "required_free_bytes": MINIMUM_FREE_DISK_BYTES,
+                        "source_bytes": int(state["source_bytes"]),
+                        "spool_bytes": spool.storage_bytes(),
+                        "spool_events": spool.count(),
+                        "spool_schema": 2,
+                    }
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
     gap_provenance = tuple(
         Provenance(

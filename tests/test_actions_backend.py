@@ -56,6 +56,7 @@ from scripts.actions_backend import (
     _revalidate_prior_canary_evidence,
     _validate_receipt_coverage,
     _verify_canary_dispositions,
+    command_execute_day,
     day_plan,
     inventory_anomalies,
     load_authority,
@@ -65,11 +66,13 @@ from scripts.actions_backend import (
     verified_partitions,
 )
 from scripts.run_backfill import (
+    MINIMUM_FREE_DISK_BYTES,
     _acquire_with_retry,
     _market_starts,
     _validate_expected_market_identities,
     _validate_expected_source_identity,
     _validate_pmxt_download,
+    _verify_shared_disk_margin,
     run_day,
 )
 
@@ -178,8 +181,28 @@ class ActionsBackendTests(unittest.TestCase):
         for command in ("canary", "plan", "execute-day", "checkpoint"):
             self.assertIn(f"python -m scripts.actions_backend {command}", workflow)
         self.assertIn("max-parallel: 4", workflow)
+        self.assertIn("polymarket-15m-seven-canary-authority", workflow)
         self.assertIn("queue: max", workflow)
         self.assertIn("needs:\n      - plan\n      - backfill-day", workflow)
+        self.assertLess(
+            workflow.index("git pull --ff-only origin main"),
+            workflow.index(
+                "python -m pip install --disable-pip-version-check --no-cache-dir .",
+                workflow.index("git pull --ff-only origin main"),
+            ),
+        )
+        self.assertEqual(MINIMUM_FREE_DISK_BYTES, 4_000_000_000)
+        recovery = (
+            root / ".github/workflows/polymarket-15m-seven-recover-day.yml"
+        ).read_text()
+        self.assertIn("inputs.release_group", recovery)
+        self.assertIn("python -m scripts.actions_backend execute-day", recovery)
+        self.assertIn('--day "${{ inputs.day }}"', recovery)
+        self.assertIn('--expected-release-group "${{ inputs.release_group }}"', recovery)
+        self.assertLess(
+            recovery.index("git pull --ff-only origin main"),
+            recovery.index("python -m pip install --disable-pip-version-check --no-cache-dir ."),
+        )
         for module in ("scripts.actions_backend", "scripts.run_backfill"):
             completed = subprocess.run(
                 [sys.executable, "-m", module, "--help"],
@@ -189,6 +212,55 @@ class ActionsBackendTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+        bootstrap = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib, scripts, canonical_data; "
+                "root=pathlib.Path.cwd().resolve(); "
+                "assert pathlib.Path(canonical_data.__file__).resolve().is_relative_to(root/'src')",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
+
+    def test_bounded_recovery_fails_before_inventory_on_wrong_release_group(self) -> None:
+        authority = self.authority()
+        with (
+            patch("scripts.actions_backend.load_authority", return_value=authority),
+            patch("scripts.actions_backend._require_canary_receipt"),
+            patch(
+                "scripts.actions_backend._full_plan",
+                return_value=[
+                    {
+                        "day": "2026-04-05",
+                        "release_group": "polymarket-15m-seven-v1-2026-04-a",
+                    }
+                ],
+            ),
+            patch("scripts.actions_backend.remote_inventory") as inventory,
+            self.assertRaisesRegex(RuntimeError, "does not match the frozen plan"),
+        ):
+            command_execute_day("2026-04-05", "wrong-release")
+        inventory.assert_not_called()
+
+    def test_shared_spool_breaker_reports_exact_capacity_figures(self) -> None:
+        spool = Mock()
+        spool.storage_bytes.return_value = 23_456
+        usage = Mock(total=72_000_000_000, free=3_999_999_999)
+        with (
+            patch("scripts.run_backfill.shutil.disk_usage", return_value=usage),
+            self.assertRaisesRegex(
+                ResourceLimitError,
+                "free_bytes=3999999999.*required_free_bytes=4000000000.*"
+                "spool_bytes=23456.*completed_sources=26.*source_bytes=12428536165.*"
+                "disk_total_bytes=72000000000",
+            ),
+        ):
+            _verify_shared_disk_margin(Path("shared"), spool, 26, 12_428_536_165)
 
     def test_control_plane_digest_is_checkout_newline_independent(self) -> None:
         expected = hashlib.sha256(b"only.txt\0alpha\nbeta\n\0").hexdigest()
