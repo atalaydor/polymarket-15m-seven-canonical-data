@@ -30,6 +30,7 @@ from canonical_data.pipeline import PartitionInputs, Pipeline, PipelineLimits
 from canonical_data.pmxt import BookReconstructor, decode_rows
 from canonical_data.release import (
     DirectoryReleaseBackend,
+    GitHubAPIError,
     GitHubReleaseBackend,
     Publisher,
     ReleaseAsset,
@@ -531,6 +532,101 @@ class FailingOnceBackend(DirectoryReleaseBackend):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_ambiguous_release_create_reconciles_before_retry(self) -> None:
+        class AmbiguousCreate(GitHubReleaseBackend):
+            def __init__(self, created_remotely: bool) -> None:
+                self.api = "https://api.example.test/repos/owner/repository"
+                self.created_remotely = created_remotely
+                self.post_calls = 0
+                self.inventory_calls = 0
+
+            def _request(
+                self,
+                method: str,
+                url: str,
+                payload: bytes | None = None,
+                content_type: str = "application/json",
+            ) -> Any:
+                del url, payload, content_type
+                if method == "GET":
+                    self.inventory_calls += 1
+                    if self.inventory_calls == 1 or not self.created_remotely:
+                        return []
+                    return [{"id": 42, "tag_name": "pilot", "draft": True}]
+                self.post_calls += 1
+                self.created_remotely = True
+                raise GitHubAPIError("POST", 503)
+
+        backend = AmbiguousCreate(created_remotely=False)
+        with patch("canonical_data.release.time.sleep") as sleep:
+            self.assertEqual(backend.ensure_draft("pilot"), "42")
+        self.assertEqual(backend.post_calls, 1)
+        self.assertEqual(backend.inventory_calls, 2)
+        sleep.assert_not_called()
+
+    def test_release_create_retries_only_after_empty_reconciliation(self) -> None:
+        class RetryCreate(GitHubReleaseBackend):
+            def __init__(self) -> None:
+                self.api = "https://api.example.test/repos/owner/repository"
+                self.created = False
+                self.post_calls = 0
+
+            def _request(
+                self,
+                method: str,
+                url: str,
+                payload: bytes | None = None,
+                content_type: str = "application/json",
+            ) -> Any:
+                del url, payload, content_type
+                if method == "GET":
+                    return (
+                        [{"id": 42, "tag_name": "pilot", "draft": True}]
+                        if self.created
+                        else []
+                    )
+                self.post_calls += 1
+                if self.post_calls == 1:
+                    raise GitHubAPIError("POST", 503)
+                self.created = True
+                return {"id": 42, "tag_name": "pilot", "draft": True}
+
+        backend = RetryCreate()
+        with patch("canonical_data.release.time.sleep") as sleep:
+            self.assertEqual(backend.ensure_draft("pilot"), "42")
+        self.assertEqual(backend.post_calls, 2)
+        sleep.assert_called_once_with(2)
+
+    def test_release_create_relists_after_backoff_before_retry(self) -> None:
+        class DelayedVisibility(GitHubReleaseBackend):
+            def __init__(self) -> None:
+                self.api = "https://api.example.test/repos/owner/repository"
+                self.inventory_calls = 0
+                self.post_calls = 0
+
+            def _request(
+                self,
+                method: str,
+                url: str,
+                payload: bytes | None = None,
+                content_type: str = "application/json",
+            ) -> Any:
+                del url, payload, content_type
+                if method == "GET":
+                    self.inventory_calls += 1
+                    if self.inventory_calls < 3:
+                        return []
+                    return [{"id": 42, "tag_name": "pilot", "draft": True}]
+                self.post_calls += 1
+                raise GitHubAPIError("POST", 503)
+
+        backend = DelayedVisibility()
+        with patch("canonical_data.release.time.sleep") as sleep:
+            self.assertEqual(backend.ensure_draft("pilot"), "42")
+        self.assertEqual(backend.post_calls, 1)
+        self.assertEqual(backend.inventory_calls, 3)
+        sleep.assert_called_once_with(2)
+
     def test_github_inventory_retries_tls_without_disabling_verification(self) -> None:
         class Response:
             def __enter__(self) -> Response:

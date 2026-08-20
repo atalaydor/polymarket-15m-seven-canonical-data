@@ -73,9 +73,13 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: write
+    concurrency:
+      group: polymarket-15m-seven-release-${{ matrix.release_group }}
+      queue: max
+      cancel-in-progress: false
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,7 +89,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python -m scripts.actions_backend execute-day --day "${{ matrix.day }}"
+
+  checkpoint:
+    if: ${{ always() && inputs.mode == 'full-backfill' }}
+    needs:
+      - plan
+      - backfill-day
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir .
+      - run: git pull --ff-only origin main
       - name: Serialize the aggregate remote-authority checkpoint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m scripts.actions_backend checkpoint
+      - name: Commit the aggregate remote-authority checkpoint
         run: |
           if git diff --quiet -- config/backfill-ledger.json; then exit 0; fi
           git config user.name github-actions[bot]

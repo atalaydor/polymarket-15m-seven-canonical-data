@@ -18,10 +18,13 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from canonical_data.acquire import BoundedAcquirer
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.discovery import GammaClient
-from canonical_data.errors import ResourceLimitError, SourceError
+from canonical_data.errors import ResourceLimitError, SourceError, SourceIdentityError
 from canonical_data.httpclient import USER_AGENT
 from canonical_data.inventory import (
     PMXT_MISSING_OBJECT_URLS,
@@ -232,15 +235,23 @@ def _fetch_gamma(url: str, max_bytes: int) -> bytes:
 
 
 def _acquire_with_retry(
-    source: SourceObject, raw_dir: Path, max_object_bytes: int = MAX_SOURCE_OBJECT_BYTES
+    source: SourceObject,
+    raw_dir: Path,
+    max_object_bytes: int = MAX_SOURCE_OBJECT_BYTES,
+    expected_identity: tuple[int, str] | None = None,
 ) -> Any:
+    stable_identity = expected_identity or _probe_source_identity(source)
     last: Exception | None = None
     for attempt, delay in enumerate((0, *RETRY_DELAYS)):
         if delay:
             time.sleep(delay)
         try:
-            return BoundedAcquirer(raw_dir, max_object_bytes, 8_000_000_000).acquire(source)
-        except ResourceLimitError:
+            return BoundedAcquirer(raw_dir, max_object_bytes, 8_000_000_000).acquire(
+                source,
+                expected_identity=stable_identity,
+                validator=_validate_pmxt_download,
+            )
+        except (ResourceLimitError, SourceIdentityError):
             raise
         except urllib.error.HTTPError as exc:
             if exc.code not in TRANSIENT_HTTP_STATUS:
@@ -252,6 +263,42 @@ def _acquire_with_retry(
             break
     assert last is not None
     raise last
+
+
+def _probe_source_identity(source: SourceObject) -> tuple[int, str]:
+    request = urllib.request.Request(
+        source.url,
+        method="HEAD",
+        headers={"Accept-Encoding": "identity", "User-Agent": USER_AGENT},
+    )
+    last: Exception | None = None
+    for attempt, delay in enumerate((0, *RETRY_DELAYS)):
+        if delay:
+            time.sleep(delay)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                length = int(response.headers.get("Content-Length", "0"))
+                etag = response.headers.get("ETag", "")
+                if length <= 0 or not etag:
+                    raise SourceIdentityError("source HEAD lacks stable length and ETag identity")
+                return length, etag
+        except urllib.error.HTTPError as exc:
+            if exc.code not in TRANSIENT_HTTP_STATUS:
+                raise
+            last = exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last = exc
+        if attempt == len(RETRY_DELAYS):
+            break
+    assert last is not None
+    raise last
+
+
+def _validate_pmxt_download(path: Path) -> None:
+    try:
+        pq.read_metadata(path)
+    except (pa.ArrowException, OSError) as exc:
+        raise SourceError("downloaded PMXT object is not valid Parquet") from exc
 
 
 def _provenance_from_json(value: dict[str, Any]) -> Provenance:
@@ -378,7 +425,18 @@ def prepare_shared_day(
                 state["source_gaps"][source.url] = PMXT_HTTP_404_GAPS[source.url]
                 _atomic_json(state_path, state)
                 continue
-            acquired = _acquire_with_retry(source, shared / "raw")
+            qualified_identity = (
+                expected_source_identities.get(source.url)
+                if expected_source_identities is not None
+                else None
+            )
+            if expected_source_identities is not None and qualified_identity is None:
+                raise SourceIdentityError("qualified PMXT source identity is missing")
+            acquired = _acquire_with_retry(
+                source,
+                shared / "raw",
+                expected_identity=qualified_identity,
+            )
             _validate_expected_source_identity(
                 source,
                 acquired.byte_length,

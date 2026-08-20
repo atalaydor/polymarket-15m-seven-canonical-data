@@ -215,6 +215,45 @@ class GitHubReleaseBackend:
         ) from last_error
 
     def ensure_draft(self, tag: str) -> str:
+        matches = self._releases_by_tag(tag)
+        if matches:
+            return self._single_draft_id(matches)
+        payload = json.dumps(
+            {"tag_name": tag, "name": tag, "draft": True, "prerelease": False}
+        ).encode()
+        last_error: SourceError | None = None
+        for attempt, delay in enumerate((0, *RETRY_DELAYS)):
+            if delay:
+                time.sleep(delay)
+                matches = self._releases_by_tag(tag)
+                if matches:
+                    return self._single_draft_id(matches)
+            created: dict[str, Any] | None = None
+            try:
+                created = self._request("POST", f"{self.api}/releases", payload)
+            except SourceError as exc:
+                last_error = exc
+            matches = self._releases_by_tag(tag)
+            if matches:
+                return self._single_draft_id(matches)
+            if created is not None:
+                for reconcile_delay in RETRY_DELAYS:
+                    time.sleep(reconcile_delay)
+                    matches = self._releases_by_tag(tag)
+                    if matches:
+                        return self._single_draft_id(matches)
+                raise SourceError("created GitHub release is absent from reconciled inventory")
+            if (
+                isinstance(last_error, GitHubAPIError)
+                and last_error.code not in TRANSIENT_HTTP_STATUS
+            ):
+                raise last_error
+            if attempt == len(RETRY_DELAYS):
+                break
+        assert last_error is not None
+        raise last_error
+
+    def _releases_by_tag(self, tag: str) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
         for page in range(1, 11):
             releases = self._request("GET", f"{self.api}/releases?per_page=100&page={page}")
@@ -223,17 +262,15 @@ class GitHubReleaseBackend:
                 break
         else:
             raise ResourceLimitError("GitHub release inventory exceeds bounded lookup")
+        return matches
+
+    @staticmethod
+    def _single_draft_id(matches: list[dict[str, Any]]) -> str:
         if len(matches) > 1:
             raise ConflictError("multiple GitHub releases share the staged tag")
-        if matches:
-            release = matches[0]
-            if not release.get("draft"):
-                raise ConflictError("existing release is not staged as draft")
-        else:
-            payload = json.dumps(
-                {"tag_name": tag, "name": tag, "draft": True, "prerelease": False}
-            ).encode()
-            release = self._request("POST", f"{self.api}/releases", payload)
+        release = matches[0]
+        if not release.get("draft"):
+            raise ConflictError("existing release is not staged as draft")
         return str(release["id"])
 
     def list_assets(self, release_id: str) -> list[ReleaseAsset]:

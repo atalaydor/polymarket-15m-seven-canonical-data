@@ -696,8 +696,17 @@ def _fatal_inventory_anomalies(anomalies: dict[str, list[str]]) -> bool:
 
 
 def day_plan(plan: list[dict[str, Any]]) -> list[dict[str, str]]:
+    days_by_release: dict[str, set[str]] = {}
+    for item in plan:
+        day = str(item["partition_id"]).split("/")[2]
+        release_group = str(item["release_group"])
+        days_by_release.setdefault(release_group, set()).add(day)
+    ordered = {group: sorted(days) for group, days in sorted(days_by_release.items())}
     return [
-        {"day": day} for day in sorted({str(item["partition_id"]).split("/")[2] for item in plan})
+        {"day": days[index], "release_group": group}
+        for index in range(max((len(days) for days in ordered.values()), default=0))
+        for group, days in ordered.items()
+        if index < len(days)
     ]
 
 
@@ -1036,6 +1045,25 @@ def command_plan() -> None:
                 "unfinished_partitions": len(unfinished),
                 "utc_days": len(days),
                 "matrix": json.loads(matrix),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def command_checkpoint() -> None:
+    if not os.environ.get("GITHUB_TOKEN"):
+        raise RuntimeError("checkpoint requires authenticated GitHub remote authority")
+    authority = load_authority()
+    _require_canary_receipt(authority)
+    ledger = reconcile_ledger(remote_inventory(), authority)
+    _atomic_json(LEDGER_PATH, ledger)
+    print(
+        json.dumps(
+            {
+                "completed": ledger["completed"],
+                "unfinished": ledger["unfinished"],
+                "continuation_partition": ledger["continuation_partition"],
             },
             sort_keys=True,
         )
@@ -1688,6 +1716,7 @@ def main() -> None:
     commands.add_parser("plan")
     commands.add_parser("canary")
     commands.add_parser("reconcile")
+    commands.add_parser("checkpoint")
     day = commands.add_parser("execute-day")
     day.add_argument("--day", required=True)
     args = parser.parse_args()
@@ -1699,6 +1728,8 @@ def main() -> None:
         authority = load_authority()
         _require_canary_receipt(authority)
         print(json.dumps(reconcile_ledger(remote_inventory(), authority), sort_keys=True))
+    elif args.command == "checkpoint":
+        command_checkpoint()
     else:
         command_execute_day(args.day)
 

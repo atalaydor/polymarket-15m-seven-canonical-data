@@ -9,6 +9,10 @@ class SourceError(PipelineError):
     """A source is malformed, corrupt, substituted, or exceeds bounds."""
 
 
+class SourceIdentityError(SourceError):
+    """An authoritative source object changed identity during bounded acquisition."""
+
+
 class IdentityError(PipelineError):
     """Official market identity or resolution evidence is invalid."""
 

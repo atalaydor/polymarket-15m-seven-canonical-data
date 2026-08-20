@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -17,10 +18,18 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from helpers import START_S, market
 
+from canonical_data.acquire import AcquiredObject, BoundedAcquirer
 from canonical_data.audit import canonical_json_bytes
-from canonical_data.errors import ResourceLimitError, SourceError, UnresolvedMarketError
+from canonical_data.errors import (
+    ResourceLimitError,
+    SourceError,
+    SourceIdentityError,
+    UnresolvedMarketError,
+)
 from canonical_data.inventory import SourceObject, pmxt_hourly_objects
 from canonical_data.models import Asset
 from canonical_data.sources import OfficialDiscovery
@@ -60,6 +69,7 @@ from scripts.run_backfill import (
     _market_starts,
     _validate_expected_market_identities,
     _validate_expected_source_identity,
+    _validate_pmxt_download,
     run_day,
 )
 
@@ -165,8 +175,11 @@ class ActionsBackendTests(unittest.TestCase):
         for path in sources:
             self.assertNotRegex(path.read_text(), direct_script, str(path))
         workflow = (root / ".github/workflows/polymarket-15m-seven.yml").read_text()
-        for command in ("canary", "plan", "execute-day"):
+        for command in ("canary", "plan", "execute-day", "checkpoint"):
             self.assertIn(f"python -m scripts.actions_backend {command}", workflow)
+        self.assertIn("max-parallel: 4", workflow)
+        self.assertIn("queue: max", workflow)
+        self.assertIn("needs:\n      - plan\n      - backfill-day", workflow)
         for module in ("scripts.actions_backend", "scripts.run_backfill"):
             completed = subprocess.run(
                 [sys.executable, "-m", module, "--help"],
@@ -216,7 +229,11 @@ class ActionsBackendTests(unittest.TestCase):
     def test_acquisition_does_not_retry_limits_or_unexplained_404(self) -> None:
         source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
         missing = urllib.error.HTTPError(source.url, 404, "Not Found", Message(), None)
-        for failure in (ResourceLimitError("cap"), missing):
+        for failure in (
+            ResourceLimitError("cap"),
+            SourceIdentityError("changed"),
+            missing,
+        ):
             with (
                 patch(
                     "scripts.run_backfill.BoundedAcquirer.acquire", side_effect=failure
@@ -225,9 +242,127 @@ class ActionsBackendTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as temporary,
             ):
                 with self.assertRaises(type(failure)):
-                    _acquire_with_retry(source, Path(temporary))
+                    _acquire_with_retry(
+                        source, Path(temporary), expected_identity=(123, '"stable"')
+                    )
             acquire.assert_called_once()
             sleep.assert_not_called()
+
+    def test_corrupt_pmxt_is_reacquired_only_under_stable_identity(self) -> None:
+        source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
+        identity = (123, '"stable"')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            corrupt = root / "corrupt.parquet"
+            corrupt.write_bytes(b"not parquet")
+            valid = root / "valid.parquet"
+            pq.write_table(pa.table({"value": [1]}), valid)
+            attempts = 0
+
+            def acquire(
+                selected: SourceObject,
+                *,
+                expected_identity: tuple[int, str],
+                validator: Callable[[Path], None],
+            ) -> AcquiredObject:
+                nonlocal attempts
+                attempts += 1
+                path = corrupt if attempts == 1 else valid
+                validator(path)
+                payload = path.read_bytes()
+                return AcquiredObject(
+                    selected,
+                    path,
+                    len(payload),
+                    hashlib.sha256(payload).hexdigest(),
+                    expected_identity[1],
+                )
+
+            with (
+                patch(
+                    "scripts.run_backfill.BoundedAcquirer.acquire",
+                    side_effect=acquire,
+                ) as acquire_mock,
+                patch("scripts.run_backfill.time.sleep") as sleep,
+            ):
+                result = _acquire_with_retry(
+                    source, root, expected_identity=identity
+                )
+            self.assertEqual(result.path, valid)
+            self.assertEqual(acquire_mock.call_count, 2)
+            self.assertTrue(
+                all(
+                    call.kwargs["expected_identity"] == identity
+                    for call in acquire_mock.call_args_list
+                )
+            )
+            self.assertTrue(
+                all(
+                    call.kwargs["validator"] is _validate_pmxt_download
+                    for call in acquire_mock.call_args_list
+                )
+            )
+            sleep.assert_called_once_with(2)
+
+    def test_real_acquisition_rejects_incomplete_parquet_and_persists_identity(self) -> None:
+        source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "fixture.parquet"
+            pq.write_table(pa.table({"value": [1]}), fixture)
+            valid_payload = fixture.read_bytes()
+            identity = (len(valid_payload), '"stable"')
+            head = FakeResponse(b"")
+            head.headers.replace_header("Content-Length", str(identity[0]))
+            head.headers["ETag"] = identity[1]
+            incomplete = FakeResponse(valid_payload[:-4])
+            incomplete.headers.replace_header("Content-Length", str(identity[0]))
+            incomplete.headers["ETag"] = identity[1]
+            complete = FakeResponse(valid_payload)
+            complete.headers["ETag"] = identity[1]
+            work = root / "work"
+            with (
+                patch(
+                    "canonical_data.acquire.urllib.request.urlopen",
+                    side_effect=(head, incomplete, complete),
+                ) as urlopen,
+                patch("scripts.run_backfill.time.sleep") as sleep,
+            ):
+                acquired = _acquire_with_retry(source, work)
+            self.assertEqual(acquired.etag, identity[1])
+            self.assertEqual(acquired.byte_length, identity[0])
+            self.assertEqual(urlopen.call_count, 3)
+            sleep.assert_called_once_with(2)
+            with patch(
+                "canonical_data.acquire.urllib.request.urlopen"
+            ) as unexpected_download:
+                resumed = BoundedAcquirer(work, 1_000_000, 0).acquire(
+                    source,
+                    expected_identity=identity,
+                    validator=_validate_pmxt_download,
+                )
+            unexpected_download.assert_not_called()
+            self.assertEqual(resumed, acquired)
+
+    def test_real_acquisition_does_not_retry_changed_get_identity(self) -> None:
+        source = SourceObject("pmxt_v2", "https://example.test/hour.parquet")
+        head = FakeResponse(b"")
+        head.headers.replace_header("Content-Length", "123")
+        head.headers["ETag"] = '"stable"'
+        changed = FakeResponse(b"changed")
+        changed.headers["ETag"] = '"substituted"'
+        with (
+            patch(
+                "canonical_data.acquire.urllib.request.urlopen",
+                side_effect=(head, changed),
+            ) as urlopen,
+            patch("scripts.run_backfill.time.sleep") as sleep,
+            tempfile.TemporaryDirectory() as temporary,
+            self.assertRaisesRegex(SourceIdentityError, "identity changed"),
+        ):
+            _acquire_with_retry(source, Path(temporary))
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_not_called()
 
     def test_explicit_market_starts_must_be_one_day_and_15m_aligned(self) -> None:
         day = datetime.fromtimestamp(START_S, UTC).date()
@@ -247,7 +382,42 @@ class ActionsBackendTests(unittest.TestCase):
         self.assertEqual(len(ids), 13)
         self.assertEqual(len(ids), len(set(ids)))
         days = day_plan(plan)
-        self.assertEqual(days, [{"day": "2026-04-05"}, {"day": "2026-04-06"}])
+        self.assertEqual(
+            days,
+            [
+                {
+                    "day": "2026-04-05",
+                    "release_group": "polymarket-15m-seven-v1-2026-04-a",
+                },
+                {
+                    "day": "2026-04-06",
+                    "release_group": "polymarket-15m-seven-v1-2026-04-a",
+                },
+            ],
+        )
+
+    def test_day_plan_round_robins_release_groups(self) -> None:
+        plan = [
+            {
+                "partition_id": f"BTC/15m/{day}",
+                "release_group": release_group,
+            }
+            for day, release_group in (
+                ("2026-04-01", "release-a"),
+                ("2026-04-02", "release-a"),
+                ("2026-04-16", "release-b"),
+                ("2026-04-17", "release-b"),
+            )
+        ]
+        self.assertEqual(
+            day_plan(plan),
+            [
+                {"day": "2026-04-01", "release_group": "release-a"},
+                {"day": "2026-04-16", "release_group": "release-b"},
+                {"day": "2026-04-02", "release_group": "release-a"},
+                {"day": "2026-04-17", "release_group": "release-b"},
+            ],
+        )
 
     def test_partial_resumes_while_unsafe_remote_state_fails_closed(self) -> None:
         authority = self.authority()
