@@ -182,6 +182,7 @@ class ActionsBackendTests(unittest.TestCase):
             self.assertIn(f"python -m scripts.actions_backend {command}", workflow)
         self.assertIn("max-parallel: 4", workflow)
         self.assertIn("polymarket-15m-seven-canary-authority", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
         self.assertIn("queue: max", workflow)
         self.assertIn("needs:\n      - plan\n      - backfill-day", workflow)
         self.assertLess(
