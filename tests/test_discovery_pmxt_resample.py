@@ -20,8 +20,14 @@ from canonical_data.errors import (
     ResourceLimitError,
     SourceError,
 )
-from canonical_data.models import Asset, EventType
-from canonical_data.pmxt import PMXT_COLUMNS, BookReconstructor, decode_rows, read_pmxt_parquet
+from canonical_data.models import Asset, BookEvent, EventType
+from canonical_data.pmxt import (
+    PMXT_COLUMNS,
+    BookReconstructor,
+    decode_rows,
+    order_and_deduplicate,
+    read_pmxt_parquet,
+)
 from canonical_data.resample import resample_200ms
 from canonical_data.sources import ProductionSourceLoader
 
@@ -143,11 +149,18 @@ class PmxtTests(unittest.TestCase):
         timestamp = datetime.fromtimestamp(START_NS / 1_000_000_000, UTC)
         base = pmxt_rows(False)[0]
         rows = []
-        for condition in (CONDITION, "0x" + "f" * 64):
+        other = "0x" + "f" * 64
+        for condition, token in (
+            (CONDITION, "1"),
+            (CONDITION, "1"),
+            (CONDITION, "3"),
+            (other, "3"),
+        ):
             row = {key: base.get(key) for key in PMXT_COLUMNS}
             row["timestamp_received"] = timestamp
             row["timestamp"] = timestamp
             row["market"] = condition.encode()
+            row["asset_id"] = token
             rows.append(row)
         schema = pa.schema(
             [
@@ -172,15 +185,55 @@ class PmxtTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "pmxt.parquet"
             pq.write_table(pa.Table.from_pylist(rows, schema=schema), path, row_group_size=1)
-            found = read_pmxt_parquet(path, {CONDITION}, {"1"}, "fixture", max_scanned_rows=2)
+            found = read_pmxt_parquet(path, {CONDITION}, {"1"}, "fixture", max_scanned_rows=3)
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0].condition_id, CONDITION)
+            separate_other = read_pmxt_parquet(
+                path, {other}, {"3"}, "fixture", max_scanned_rows=2
+            )
+            combined = read_pmxt_parquet(
+                path,
+                {CONDITION, other},
+                {"1", "3"},
+                "fixture",
+                max_scanned_rows=3,
+                source_row_partition_by_condition={CONDITION: "DOGE", other: "BTC"},
+                token_ids_by_source_row_partition={"DOGE": {"1"}, "BTC": {"3"}},
+            )
+            self.assertEqual(separate_other[0].source_row, 0)
+            self.assertEqual(
+                {event.condition_id: event.source_row for event in combined},
+                {CONDITION: found[0].source_row, other: separate_other[0].source_row},
+            )
+            self.assertEqual(len(combined), 2)
+            with self.assertRaisesRegex(ResourceLimitError, "partition cap"):
+                read_pmxt_parquet(
+                    path,
+                    {CONDITION, other},
+                    {"1", "3"},
+                    "fixture",
+                    max_scanned_rows=3,
+                    max_output_rows=4,
+                    source_row_partition_by_condition={CONDITION: "DOGE", other: "BTC"},
+                    token_ids_by_source_row_partition={"DOGE": {"1"}, "BTC": {"3"}},
+                    max_output_rows_per_source_row_partition=1,
+                )
             with self.assertRaises(ResourceLimitError):
                 read_pmxt_parquet(path, {CONDITION}, {"1"}, "fixture", max_scanned_rows=0)
             downloaded = ProductionSourceLoader(GammaClient(), 7).load_downloaded_pmxt(
                 path, "https://example.test/hour.parquet", (market(),), '"etag"'
             )
             self.assertEqual(len(downloaded.events), 1)
+            batches: list[BookEvent] = []
+            streamed = ProductionSourceLoader(GammaClient(), 7).load_downloaded_pmxt(
+                path,
+                "https://example.test/hour.parquet",
+                (market(),),
+                '"etag"',
+                event_batch_consumer=batches.extend,
+            )
+            self.assertEqual(streamed.events, ())
+            self.assertEqual(order_and_deduplicate(batches), list(downloaded.events))
             self.assertEqual(
                 downloaded.provenance[0].transformations,
                 (

@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 from canonical_data.errors import ConflictError
 from canonical_data.models import (
     BookEvent,
+    EventType,
     Exclusion,
     Level,
     Market,
@@ -147,6 +148,40 @@ def event_row(event: BookEvent) -> dict[str, Any]:
         "bids": _level_rows(event.bids),
         "asks": _level_rows(event.asks),
     }
+
+
+def event_from_row(row: dict[str, Any]) -> BookEvent:
+    def levels(value: list[dict[str, Decimal]] | None) -> tuple[Level, ...] | None:
+        if value is None:
+            return None
+        return tuple(Level(item["price"], item["size"]) for item in value)
+
+    return BookEvent(
+        condition_id=str(row["condition_id"]),
+        token_id=str(row["token_id"]),
+        source_ts_ns=int(row["source_ts_ns"]),
+        receive_ts_ns=(
+            int(row["receive_ts_ns"]) if row["receive_ts_ns"] is not None else None
+        ),
+        source_object=str(row["source_object"]),
+        source_row=int(row["source_row"]),
+        sequence=int(row["sequence"]),
+        event_type=EventType(str(row["event_type"])),
+        source_id=str(row["source_id"]),
+        bids=levels(row["bids"]),
+        asks=levels(row["asks"]),
+        side=str(row["side"]) if row["side"] is not None else None,
+        price=row["price"],
+        size=row["size"],
+        best_bid=row["best_bid"],
+        best_ask=row["best_ask"],
+        old_tick_size=row["old_tick_size"],
+        new_tick_size=row["new_tick_size"],
+        fee_rate_bps=(int(row["fee_rate_bps"]) if row["fee_rate_bps"] is not None else None),
+        transaction_hash=(
+            str(row["transaction_hash"]) if row["transaction_hash"] is not None else None
+        ),
+    )
 
 
 def sample_row(sample: Sample200ms) -> dict[str, Any]:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -58,6 +58,10 @@ def read_pmxt_parquet(
     max_scanned_rows: int = 25_000_000,
     max_output_rows: int = 500_000,
     receive_bounds_by_condition: Mapping[str, tuple[int, int]] | None = None,
+    event_batch_consumer: Callable[[list[BookEvent]], None] | None = None,
+    source_row_partition_by_condition: Mapping[str, str] | None = None,
+    token_ids_by_source_row_partition: Mapping[str, set[str]] | None = None,
+    max_output_rows_per_source_row_partition: int | None = None,
 ) -> list[BookEvent]:
     if not condition_ids or not token_ids:
         return []
@@ -67,17 +71,50 @@ def read_pmxt_parquet(
         selected: list[int] = []
         scanned = 0
         encoded = {value.encode("ascii") for value in condition_ids}
+        partitions: dict[str, set[bytes]] = {}
+        partition_offsets: dict[str, dict[int, int]] = {}
+        if source_row_partition_by_condition is not None:
+            if set(source_row_partition_by_condition) != condition_ids:
+                raise SourceError("source-row partitions do not match the PMXT condition filter")
+            for condition_id, partition in source_row_partition_by_condition.items():
+                partitions.setdefault(partition, set()).add(condition_id.encode("ascii"))
+            if (
+                token_ids_by_source_row_partition is None
+                or set(token_ids_by_source_row_partition) != set(partitions)
+                or any(not values for values in token_ids_by_source_row_partition.values())
+            ):
+                raise SourceError("source-row partitions lack their exact PMXT token filters")
+        elif token_ids_by_source_row_partition is not None:
+            raise SourceError("partitioned PMXT tokens require source-row partitions")
+
+        def includes(group: Any, values: set[bytes]) -> bool:
+            stats = group.column(market_index).statistics
+            if stats is None or not stats.has_min_max:
+                return True
+            minimum = stats.min if isinstance(stats.min, bytes) else str(stats.min).encode()
+            maximum = stats.max if isinstance(stats.max, bytes) else str(stats.max).encode()
+            return any(minimum <= value <= maximum for value in values)
+
+        for partition, values in partitions.items():
+            offset = 0
+            offsets: dict[int, int] = {}
+            for index in range(parquet.metadata.num_row_groups):
+                group = parquet.metadata.row_group(index)
+                if includes(group, values):
+                    offsets[index] = offset
+                    offset += group.num_rows
+                    if offset > max_scanned_rows:
+                        raise ResourceLimitError(
+                            "PMXT selected row groups exceed scan-row cap"
+                        )
+            partition_offsets[partition] = offsets
+
+        scan_limit = max_scanned_rows * max(len(partitions), 1)
         for index in range(parquet.metadata.num_row_groups):
             group = parquet.metadata.row_group(index)
-            stats = group.column(market_index).statistics
-            include = True
-            if stats is not None and stats.has_min_max:
-                minimum = stats.min if isinstance(stats.min, bytes) else str(stats.min).encode()
-                maximum = stats.max if isinstance(stats.max, bytes) else str(stats.max).encode()
-                include = any(minimum <= value <= maximum for value in encoded)
-            if include:
+            if includes(group, encoded):
                 scanned += group.num_rows
-                if scanned > max_scanned_rows:
+                if scanned > scan_limit:
                     raise ResourceLimitError("PMXT selected row groups exceed scan-row cap")
                 selected.append(index)
         if not selected:
@@ -85,6 +122,13 @@ def read_pmxt_parquet(
         market_values = pa.array(sorted(encoded), type=pa.binary(66))
         token_values = pa.array(sorted(token_ids))
         events: list[BookEvent] = []
+        emitted_rows = 0
+        partition_output_rows = {partition: 0 for partition in partitions}
+        partition_output_cap = (
+            max_output_rows
+            if max_output_rows_per_source_row_partition is None
+            else max_output_rows_per_source_row_partition
+        )
         row_offset = 0
         for index in selected:
             table = parquet.read_row_group(index, columns=PMXT_COLUMNS)
@@ -109,12 +153,44 @@ def read_pmxt_parquet(
                     bounded = pc.and_(condition_mask, time_mask)
                     window_mask = bounded if window_mask is None else pc.or_(window_mask, bounded)
                 table = table.slice(0, 0) if window_mask is None else table.filter(window_mask)
-            if len(events) + table.num_rows > max_output_rows:
+            if emitted_rows + table.num_rows > max_output_rows:
                 raise ResourceLimitError(
                     "PMXT filtered output exceeds row cap "
-                    f"({len(events) + table.num_rows} > {max_output_rows})"
+                    f"({emitted_rows + table.num_rows} > {max_output_rows})"
                 )
-            decoded = decode_rows(table.to_pylist(), source_object, row_offset)
+            if source_row_partition_by_condition is None:
+                decoded = decode_rows(table.to_pylist(), source_object, row_offset)
+            else:
+                decoded = []
+                for partition in sorted(partitions):
+                    if index not in partition_offsets[partition]:
+                        continue
+                    values = pa.array(sorted(partitions[partition]), type=pa.binary(66))
+                    partition_table = table.filter(
+                        pc.is_in(table["market"], value_set=values)
+                    )
+                    assert token_ids_by_source_row_partition is not None
+                    partition_tokens = pa.array(
+                        sorted(token_ids_by_source_row_partition[partition])
+                    )
+                    partition_table = partition_table.filter(
+                        pc.is_in(partition_table["asset_id"], value_set=partition_tokens)
+                    )
+                    partition_output_rows[partition] += partition_table.num_rows
+                    if partition_output_rows[partition] > partition_output_cap:
+                        raise ResourceLimitError(
+                            "PMXT filtered output exceeds source-row partition cap "
+                            f"({partition_output_rows[partition]} > "
+                            f"{partition_output_cap})"
+                        )
+                    decoded.extend(
+                        decode_rows(
+                            partition_table.to_pylist(),
+                            source_object,
+                            partition_offsets[partition][index],
+                        )
+                    )
+                decoded = order_and_deduplicate(decoded)
             if receive_bounds_by_condition is not None:
                 decoded = [
                     event
@@ -127,9 +203,13 @@ def read_pmxt_parquet(
                         < receive_bounds_by_condition[event.condition_id][1]
                     )
                 ]
-            events.extend(decoded)
+            if event_batch_consumer is None:
+                events.extend(decoded)
+            else:
+                event_batch_consumer(decoded)
+            emitted_rows += len(decoded)
             row_offset += parquet.metadata.row_group(index).num_rows
-        return order_and_deduplicate(events)
+        return order_and_deduplicate(events) if event_batch_consumer is None else []
     finally:
         parquet.close()
 

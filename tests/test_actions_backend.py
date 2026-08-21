@@ -74,6 +74,7 @@ from scripts.run_backfill import (
     _validate_pmxt_download,
     _verify_shared_disk_margin,
     run_day,
+    run_staged_partition,
 )
 
 
@@ -618,19 +619,26 @@ class ActionsBackendTests(unittest.TestCase):
         starts = (START_S, START_S + 900)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            spool = root / "shared" / "events.sqlite"
-            spool.parent.mkdir()
-            spool.touch()
             discoveries = {
                 asset: OfficialDiscovery((market(asset),), ()) for asset in tuple(Asset)[:2]
             }
             provenance = {asset: () for asset in discoveries}
+            staged = {asset: () for asset in discoveries}
+            stage_roots = {asset: root / asset.value for asset in discoveries}
             with (
                 patch(
-                    "scripts.run_backfill.prepare_shared_day",
-                    return_value=(spool, discoveries, provenance, 123),
+                    "scripts.run_backfill.prepare_staged_day",
+                    return_value=(
+                        discoveries,
+                        provenance,
+                        staged,
+                        stage_roots,
+                        123,
+                        {},
+                    ),
                 ) as prepare,
-                patch("scripts.run_backfill.run_partition", return_value={}) as partition,
+                patch("scripts.run_backfill.run_staged_partition", return_value={}) as partition,
+                patch("scripts.run_backfill.shutil.rmtree"),
             ):
                 run_day(
                     day,
@@ -643,7 +651,24 @@ class ActionsBackendTests(unittest.TestCase):
                 )
         prepare.assert_called_once()
         self.assertEqual(prepare.call_args.args[5], starts)
-        self.assertEqual([call.args[8] for call in partition.call_args_list], [123, 0])
+        self.assertEqual([call.args[9] for call in partition.call_args_list], [123, 0])
+
+    def test_staged_partition_rejects_an_empty_or_incomplete_market_inventory(self) -> None:
+        day = datetime.fromtimestamp(START_S, UTC).date()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(SourceError, "does not match official discovery"):
+                run_staged_partition(
+                    Asset.DOGE,
+                    day,
+                    root,
+                    root / "ledger.json",
+                    datetime.fromtimestamp(START_S + 1_800, UTC),
+                    OfficialDiscovery((market(),), ()),
+                    (),
+                    root / "stage",
+                    (),
+                )
 
     def test_actions_discovery_fails_closed_on_unresolved_gamma(self) -> None:
         authority = self.authority(date(2026, 4, 13), date(2026, 4, 13))

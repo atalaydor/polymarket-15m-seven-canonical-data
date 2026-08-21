@@ -45,6 +45,7 @@ from scripts.run_backfill import (
     PMXT_OBJECTS_PER_MARKET,
     PMXT_ROWS_PER_MARKET_OBJECT_WITH_MARGIN,
     PMXT_ROWS_PER_MARKET_WITH_MARGIN,
+    PendingMarketFragments,
     _markets_relevant_to_source,
     _restore_shared_pmxt_counts,
     enforce_shared_pmxt_asset_caps,
@@ -238,6 +239,33 @@ class InventoryAndAcquisitionTests(unittest.TestCase):
                 )
                 self.assertEqual(market_counts, {doge.condition_id: 1})
                 self.assertEqual(asset_counts, {Asset.DOGE: 1})
+
+    def test_pending_fragments_are_lossless_and_evict_completed_market_windows(self) -> None:
+        def event(condition_id: str, source_row: int) -> BookEvent:
+            return BookEvent(
+                condition_id=condition_id,
+                token_id="1",
+                source_ts_ns=START_NS,
+                receive_ts_ns=START_NS,
+                source_object="fixture",
+                source_row=source_row,
+                sequence=0,
+                event_type=EventType.PRICE_CHANGE,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            pending = PendingMarketFragments(Path(temp) / "pending")
+            conditions = [f"0x{index:064x}" for index in range(12)]
+            for index, condition_id in enumerate(conditions[:8]):
+                pending.append(condition_id, 0, [event(condition_id, index)])
+            self.assertEqual(pending.active_conditions(), 8)
+            self.assertEqual(pending.load(conditions[0]), [event(conditions[0], 0)])
+            for condition_id in conditions[:4]:
+                pending.discard(condition_id)
+            for index, condition_id in enumerate(conditions[8:], start=8):
+                pending.append(condition_id, 1, [event(condition_id, index)])
+            self.assertEqual(pending.active_conditions(), 8)
+            self.assertGreater(pending.storage_bytes(), 0)
 
     def test_15m_inventory_is_exact_at_full_and_partial_days(self) -> None:
         coverage_start = PMXT_VALIDATION_COVERAGE_START

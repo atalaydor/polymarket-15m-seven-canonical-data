@@ -1073,8 +1073,10 @@ def command_checkpoint() -> None:
 def _raise_child_failure(completed: subprocess.CompletedProcess[str]) -> None:
     if completed.returncode == 0:
         return
-    sys.stdout.write(completed.stdout)
-    sys.stderr.write(completed.stderr)
+    if completed.stdout:
+        sys.stdout.write(completed.stdout)
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
     raise RuntimeError(f"15m executor failed with exit code {completed.returncode}")
 
 
@@ -1122,11 +1124,9 @@ def command_execute_day(day_text: str, expected_release_group: str | None = None
                 ",".join(asset.value for asset in assets),
             ],
             text=True,
-            capture_output=True,
             check=False,
         )
         _raise_child_failure(completed)
-        sys.stdout.write(completed.stdout)
     refreshed = remote_inventory()
     for asset in assets:
         verify_remote_partition(f"{asset.value}/15m/{day_text}", refreshed)

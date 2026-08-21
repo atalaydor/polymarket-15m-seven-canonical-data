@@ -29,8 +29,8 @@ from canonical_data.models import (
     QualityTier,
 )
 from canonical_data.parquetio import write_partition_tables
-from canonical_data.pipeline import PartitionInputs, Pipeline, PipelineLimits
-from canonical_data.pmxt import BookReconstructor, decode_rows
+from canonical_data.pipeline import PartitionInputs, Pipeline, PipelineLimits, stage_market
+from canonical_data.pmxt import BookReconstructor, decode_rows, order_and_deduplicate
 from canonical_data.release import (
     DirectoryReleaseBackend,
     GitHubAPIError,
@@ -316,6 +316,95 @@ class PipelineTests(unittest.TestCase):
                 )
             self.assertEqual(digests[0], digests[1])
             self.assertEqual(files[0], files[1])
+
+    def test_causally_staged_pipeline_is_byte_equivalent_to_full_spool(self) -> None:
+        decoded = decode_rows(pmxt_rows(), "fixture")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            spool_path = root / "events.sqlite"
+            with EventSpool(spool_path) as spool:
+                spool.append(decoded)
+            full = Pipeline(root / "full", StateStore(root / "full-state"), COMMIT).build(
+                PartitionInputs(
+                    Asset.DOGE,
+                    "2026-04-13",
+                    (market(),),
+                    provenance=(provenance(),),
+                    event_spool_path=spool_path,
+                ),
+                market().market_end_ns,
+            )
+            staged_market = stage_market(
+                market(), order_and_deduplicate(decoded), root / "staged-fragments"
+            )
+            bounded = Pipeline(
+                root / "bounded", StateStore(root / "bounded-state"), COMMIT
+            ).build(
+                PartitionInputs(
+                    Asset.DOGE,
+                    "2026-04-13",
+                    (market(),),
+                    provenance=(provenance(),),
+                    staged_markets=(staged_market,),
+                ),
+                market().market_end_ns,
+            )
+            self.assertEqual(full.manifest_digest, bounded.manifest_digest)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in full.directory.iterdir()},
+                {path.name: path.read_bytes() for path in bounded.directory.iterdir()},
+            )
+
+    def test_causal_staging_preserves_source_gap_and_event_conflict_outputs(self) -> None:
+        conflict = {**pmxt_rows()[2], "best_ask": "0.55"}
+        cases = {
+            "source-gap": [],
+            "event-conflict": decode_rows([*pmxt_rows(False), conflict], "fixture"),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, events in cases.items():
+                with self.subTest(name=name):
+                    case_root = root / name
+                    spool_path = case_root / "events.sqlite"
+                    with EventSpool(spool_path) as spool:
+                        spool.append(events)
+                    full = Pipeline(
+                        case_root / "full", StateStore(case_root / "full-state"), COMMIT
+                    ).build(
+                        PartitionInputs(
+                            Asset.DOGE,
+                            "2026-04-13",
+                            (market(),),
+                            provenance=(provenance(),),
+                            event_spool_path=spool_path,
+                        ),
+                        market().market_end_ns,
+                    )
+                    staged_market = stage_market(
+                        market(),
+                        order_and_deduplicate(events),
+                        case_root / "fragments",
+                    )
+                    bounded = Pipeline(
+                        case_root / "bounded",
+                        StateStore(case_root / "bounded-state"),
+                        COMMIT,
+                    ).build(
+                        PartitionInputs(
+                            Asset.DOGE,
+                            "2026-04-13",
+                            (market(),),
+                            provenance=(provenance(),),
+                            staged_markets=(staged_market,),
+                        ),
+                        market().market_end_ns,
+                    )
+                    self.assertEqual(full.manifest_digest, bounded.manifest_digest)
+                    self.assertEqual(
+                        {path.name: path.read_bytes() for path in full.directory.iterdir()},
+                        {path.name: path.read_bytes() for path in bounded.directory.iterdir()},
+                    )
 
     def test_disk_spool_enforces_native_event_cap_after_deduplication(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

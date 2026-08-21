@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,6 +177,10 @@ class ProductionSourceLoader:
         etag: str | None,
         max_filtered_rows: int = 500_000,
         verified_identity: tuple[int, str] | None = None,
+        event_batch_consumer: Callable[[list[BookEvent]], None] | None = None,
+        source_row_partition_by_condition: Mapping[str, str] | None = None,
+        token_ids_by_source_row_partition: Mapping[str, set[str]] | None = None,
+        max_filtered_rows_per_source_row_partition: int | None = None,
     ) -> PMXTLoad:
         """Filter one bounded whole-object fallback without retaining the raw archive."""
         conditions = {market.condition_id for market in markets}
@@ -193,6 +198,12 @@ class ProductionSourceLoader:
             max_scanned_rows=2_000_000_000,
             max_output_rows=max_filtered_rows,
             receive_bounds_by_condition=receive_bounds,
+            event_batch_consumer=event_batch_consumer,
+            source_row_partition_by_condition=source_row_partition_by_condition,
+            token_ids_by_source_row_partition=token_ids_by_source_row_partition,
+            max_output_rows_per_source_row_partition=(
+                max_filtered_rows_per_source_row_partition
+            ),
         )
         provenance = Provenance(
             source_id="pmxt_v2",

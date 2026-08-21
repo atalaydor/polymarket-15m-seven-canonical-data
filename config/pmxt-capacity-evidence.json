@@ -55,6 +55,27 @@
       "memory_bytes": 16000000000,
       "ssd_bytes": 14000000000,
       "job_timeout_seconds": 21600
+    },
+    "high_volume_failure_lifecycle": {
+      "accessed_at": "2026-08-21",
+      "legacy_index_failure": {
+        "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/32356994563/job/96504363437",
+        "day": "2026-07-02",
+        "wall_seconds_before_failure": 9900,
+        "terminal": "sqlite database or disk is full while creating the late condition index"
+      },
+      "full_spool_margin_failure": {
+        "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/32356994563/job/96505460896",
+        "day": "2026-07-17",
+        "wall_seconds_before_failure": 10080,
+        "terminal": "shared PMXT spool exhausted disk safety margin"
+      },
+      "compact_full_spool_timeout": {
+        "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/32398487799/job/96520806977",
+        "day": "2026-07-16",
+        "wall_seconds": 21600,
+        "terminal": "GitHub six-hour job maximum"
+      }
     }
   },
   "derivation": {
@@ -72,5 +93,15 @@
     "max_rows_per_asset_object": 8102760,
     "max_markets_per_asset_day": 96,
     "max_rows_per_asset_day_partition": 194466240
+  },
+  "bounded_lifecycle": {
+    "source_scans_per_full_day_before": 175,
+    "source_scans_per_full_day_after": 25,
+    "scan_reduction_percent": 85.7142857143,
+    "maximum_pending_market_windows_per_asset_after_source": 4,
+    "maximum_pending_market_windows_all_assets_after_source": 28,
+    "raw_day_wide_spool_required": false,
+    "late_condition_index_required": false,
+    "canonical_result_staging": "zstd per-market fragments consumed in condition-id order"
   }
 }

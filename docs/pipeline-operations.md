@@ -18,4 +18,6 @@ new round publishes to its own isolated v7 namespace; earlier publications remai
 Full execution is one UTC day per job. Before doing work, the executor reconciles production Release
 assets, rejects anomalies, and selects only unfinished assets. Each successful asset publication is
 durable even if a later asset or checkpoint commit fails; the next run discovers it remotely and
-does not repeat it.
+does not repeat it. The child executor streams per-source lifecycle telemetry directly to the job
+log. `active_conditions`, `pending_bytes`, `staged_bytes`, and `disk_free_bytes` therefore expose
+progress before the six-hour boundary instead of being buffered until process exit.

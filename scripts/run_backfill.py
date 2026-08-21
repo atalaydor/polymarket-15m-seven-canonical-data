@@ -12,8 +12,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
-from dataclasses import asdict
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -33,8 +33,16 @@ from canonical_data.inventory import (
     pmxt_hourly_objects,
 )
 from canonical_data.models import Asset, BookEvent, Market, Provenance
-from canonical_data.pipeline import PartitionInputs, Pipeline, PipelineLimits
+from canonical_data.parquetio import EVENT_SCHEMA, event_from_row, event_row
+from canonical_data.pipeline import (
+    PartitionInputs,
+    Pipeline,
+    PipelineLimits,
+    StagedMarket,
+    stage_market,
+)
 from canonical_data.planner import release_bucket
+from canonical_data.pmxt import order_and_deduplicate
 from canonical_data.release import GitHubReleaseBackend, Publisher
 from canonical_data.sources import OfficialDiscovery, ProductionSourceLoader
 from canonical_data.spool import EventSpool
@@ -383,6 +391,111 @@ def _verify_shared_disk_margin(
     return usage.free
 
 
+def _tree_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _write_pending_events(path: Path, events: list[BookEvent]) -> None:
+    """Write a lossless, fast-compressed temporary fragment with atomic visibility."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".partial")
+    pq.write_table(
+        pa.Table.from_pylist([event_row(item) for item in events], schema=EVENT_SCHEMA),
+        temporary,
+        compression="zstd",
+        compression_level=1,
+        use_dictionary=False,
+        write_statistics=True,
+        data_page_version="2.0",
+        version="2.6",
+        row_group_size=65_536,
+    )
+    with temporary.open("rb+") as handle:
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+class PendingMarketFragments:
+    """Compressed source fragments retained only until a market is causally complete."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self._paths: dict[str, list[Path]] = {}
+
+    def append(self, condition_id: str, source_index: int, events: list[BookEvent]) -> None:
+        if not events:
+            return
+        path = self.root / condition_id / f"source-{source_index:02d}.parquet"
+        _write_pending_events(path, events)
+        self._paths.setdefault(condition_id, []).append(path)
+
+    def load(self, condition_id: str) -> list[BookEvent]:
+        events: list[BookEvent] = []
+        for path in self._paths.get(condition_id, []):
+            events.extend(event_from_row(row) for row in pq.read_table(path).to_pylist())
+        return events
+
+    def discard(self, condition_id: str) -> None:
+        paths = self._paths.pop(condition_id, [])
+        for path in paths:
+            path.unlink(missing_ok=True)
+        condition_dir = self.root / condition_id
+        if condition_dir.exists():
+            condition_dir.rmdir()
+
+    def active_conditions(self) -> int:
+        return len(self._paths)
+
+    def storage_bytes(self) -> int:
+        return _tree_bytes(self.root)
+
+
+def _pending_fragment_consumer(
+    fragments: PendingMarketFragments, shared: Path, free_samples: list[int]
+) -> Callable[[list[BookEvent]], None]:
+    batch_number = 0
+
+    def consume(events: list[BookEvent]) -> None:
+        nonlocal batch_number
+        groups: dict[str, list[BookEvent]] = {}
+        for event in events:
+            groups.setdefault(event.condition_id, []).append(event)
+        for condition_id, group in groups.items():
+            fragments.append(condition_id, batch_number, group)
+            batch_number += 1
+        free_bytes = shutil.disk_usage(shared).free
+        free_samples.append(free_bytes)
+        if free_bytes < MINIMUM_FREE_DISK_BYTES:
+            raise ResourceLimitError("current PMXT source fragments exhausted disk safety margin")
+
+    return consume
+
+
+def _verify_staged_disk_margin(
+    shared: Path,
+    pending: PendingMarketFragments,
+    stage_roots: Mapping[Asset, Path],
+    completed_sources: int,
+    completed_markets: int,
+    source_bytes: int,
+) -> tuple[int, int, int]:
+    usage = shutil.disk_usage(shared)
+    pending_bytes = pending.storage_bytes()
+    staged_bytes = sum(_tree_bytes(path) for path in stage_roots.values())
+    if usage.free < MINIMUM_FREE_DISK_BYTES:
+        raise ResourceLimitError(
+            "bounded PMXT staging exhausted disk safety margin "
+            f"(free_bytes={usage.free}, required_free_bytes={MINIMUM_FREE_DISK_BYTES}, "
+            f"pending_bytes={pending_bytes}, staged_bytes={staged_bytes}, "
+            f"active_conditions={pending.active_conditions()}, "
+            f"completed_sources={completed_sources}, completed_markets={completed_markets}, "
+            f"source_bytes={source_bytes}, disk_total_bytes={usage.total})"
+        )
+    return usage.free, pending_bytes, staged_bytes
+
+
 def prepare_shared_day(
     day: date,
     work_root: Path,
@@ -560,6 +673,306 @@ def prepare_shared_day(
     return spool_path, discoveries, provenance, int(state["source_bytes"])
 
 
+def prepare_staged_day(
+    day: date,
+    work_root: Path,
+    coverage_start: datetime,
+    cutoff: datetime,
+    assets: tuple[Asset, ...] = tuple(Asset),
+    starts: tuple[int, ...] | None = None,
+    expected_market_identities: dict[Asset, frozenset[tuple[str, frozenset[str]]]] | None = None,
+    expected_source_identities: dict[str, tuple[int, str]] | None = None,
+) -> tuple[
+    dict[Asset, OfficialDiscovery],
+    dict[Asset, tuple[Provenance, ...]],
+    dict[Asset, tuple[StagedMarket, ...]],
+    dict[Asset, Path],
+    int,
+    dict[str, int],
+]:
+    """Acquire each source once and evict each market as soon as its causal window closes."""
+    selected_starts = _market_starts(day, coverage_start, cutoff, starts)
+    shared = work_root / f"shared-{day.isoformat()}"
+    shared.mkdir(parents=True, exist_ok=True)
+    discoveries: dict[Asset, OfficialDiscovery] = {}
+    loaders: dict[Asset, ProductionSourceLoader] = {}
+    for asset in assets:
+        loader = ProductionSourceLoader(
+            GammaClient(fetch=_fetch_gamma),
+            time.time_ns(),
+            work_root / f"{asset.value}-{day}" / "official",
+        )
+        loaders[asset] = loader
+        discoveries[asset] = loader.discover(
+            asset, selected_starts, allow_missing=True, allow_unresolved=True
+        )
+    _validate_expected_market_identities(discoveries, expected_market_identities)
+    markets_by_asset = {asset: discoveries[asset].markets for asset in assets}
+    combined_markets = tuple(market for asset in assets for market in markets_by_asset[asset])
+    stage_roots = {
+        asset: work_root / f"{asset.value}-{day}" / "staged-markets" for asset in assets
+    }
+    if not combined_markets:
+        return (
+            discoveries,
+            {asset: () for asset in assets},
+            {asset: () for asset in assets},
+            stage_roots,
+            0,
+            {
+                "peak_pending_bytes": 0,
+                "peak_staged_bytes": 0,
+                "peak_active_conditions": 0,
+                "pmxt_scan_passes": 0,
+            },
+        )
+    if len({market.condition_id for market in combined_markets}) != len(combined_markets):
+        raise SourceError("official discoveries contain duplicate cross-asset conditions")
+
+    owner = {
+        market.condition_id: asset
+        for asset, markets in markets_by_asset.items()
+        for market in markets
+    }
+    market_by_condition = {market.condition_id: market for market in combined_markets}
+    first_start_ns = min(market.market_start_ns for market in combined_markets)
+    last_end_ns = max(market.market_end_ns for market in combined_markets)
+    source_objects = pmxt_hourly_objects(max(first_start_ns - 3_600_000_000_000, 0), last_end_ns)
+    if expected_source_identities is not None and {source.url for source in source_objects} != set(
+        expected_source_identities
+    ):
+        raise SourceError("qualified PMXT objects do not match the execution source set")
+
+    pending = PendingMarketFragments(shared / "pending")
+    staged: dict[Asset, list[StagedMarket]] = {asset: [] for asset in assets}
+    staged_conditions: set[str] = set()
+    provenance_lists: dict[Asset, list[Provenance]] = {asset: [] for asset in assets}
+    day_market_counts: dict[str, int] = {}
+    day_asset_counts = {asset: 0 for asset in assets}
+    source_gaps: dict[str, dict[str, Any]] = {}
+    source_bytes = 0
+    minimum_free_bytes = shutil.disk_usage(shared).free
+    peak_pending_bytes = 0
+    peak_current_bytes = 0
+    peak_staged_bytes = 0
+    peak_active_conditions = 0
+    peak_rss_kib = _peak_rss_kib()
+    scan_passes = 0
+    completed_sources = 0
+    minimum_available_memory_bytes = int(
+        json.loads(Path("config/pipeline.json").read_bytes())["resource_limits"][
+            "minimum_available_memory_bytes"
+        ]
+    )
+
+    for source_index, source in enumerate(source_objects):
+        source_began = time.perf_counter()
+        relevant_by_asset = {
+            asset: _markets_relevant_to_source(markets_by_asset[asset], source)
+            for asset in assets
+        }
+        relevant_markets = tuple(
+            market for asset in assets for market in relevant_by_asset[asset]
+        )
+        if not relevant_markets:
+            raise SourceError("PMXT source object has no relevant authoritative market")
+        current = PendingMarketFragments(shared / "current")
+        source_free_samples: list[int] = []
+        if source.url in PMXT_HTTP_404_GAPS:
+            source_gaps[source.url] = PMXT_HTTP_404_GAPS[source.url]
+        else:
+            qualified_identity = (
+                expected_source_identities.get(source.url)
+                if expected_source_identities is not None
+                else None
+            )
+            if expected_source_identities is not None and qualified_identity is None:
+                raise SourceIdentityError("qualified PMXT source identity is missing")
+            acquired = _acquire_with_retry(
+                source,
+                shared / "raw",
+                expected_identity=qualified_identity,
+            )
+            _validate_expected_source_identity(
+                source,
+                acquired.byte_length,
+                acquired.etag,
+                expected_source_identities,
+            )
+            loaded = loaders[assets[0]].load_downloaded_pmxt(
+                acquired.path,
+                source.url,
+                relevant_markets,
+                acquired.etag,
+                max_filtered_rows=PMXT_FILTERED_ROWS_PER_ASSET_OBJECT * len(assets),
+                max_filtered_rows_per_source_row_partition=(
+                    PMXT_FILTERED_ROWS_PER_ASSET_OBJECT
+                ),
+                verified_identity=(acquired.byte_length, acquired.sha256),
+                event_batch_consumer=_pending_fragment_consumer(
+                    current, shared, source_free_samples
+                ),
+                source_row_partition_by_condition={
+                    market.condition_id: owner[market.condition_id].value
+                    for market in relevant_markets
+                },
+                token_ids_by_source_row_partition={
+                    asset.value: {
+                        token
+                        for market in relevant_by_asset[asset]
+                        for token in (market.token_up, market.token_down)
+                    }
+                    for asset in assets
+                    if relevant_by_asset[asset]
+                },
+            )
+            scan_passes += 1
+            source_free_samples.append(shutil.disk_usage(shared).free)
+            peak_current_bytes = max(peak_current_bytes, current.storage_bytes())
+            base_provenance = loaded.provenance[0]
+            for asset in assets:
+                provenance_lists[asset].append(
+                    replace(base_provenance, retrieved_at_ns=loaders[asset].retrieved_at_ns)
+                )
+            source_bytes += acquired.byte_length
+            completed_sources += 1
+            acquired.path.unlink(missing_ok=True)
+
+        _, source_end_ns = _pmxt_source_window_ns(source)
+        object_asset_counts = {asset: 0 for asset in assets}
+        for market in sorted(relevant_markets, key=lambda item: item.condition_id):
+            if (
+                Pipeline._available_memory_bytes()
+                < minimum_available_memory_bytes
+            ):
+                raise ResourceLimitError("available memory is below staged-market headroom")
+            current_events = order_and_deduplicate(current.load(market.condition_id))
+            asset = owner[market.condition_id]
+            object_asset_counts[asset] += len(current_events)
+            if object_asset_counts[asset] > PMXT_FILTERED_ROWS_PER_ASSET_OBJECT:
+                raise ResourceLimitError(
+                    f"PMXT filtered output for {asset.value} exceeds per-object asset cap "
+                    f"({object_asset_counts[asset]} > {PMXT_FILTERED_ROWS_PER_ASSET_OBJECT})"
+                )
+            enforce_shared_pmxt_asset_caps(
+                tuple(current_events),
+                {asset: (market,)},
+                day_market_counts,
+                day_asset_counts,
+            )
+            if market.market_end_ns <= source_end_ns:
+                events = order_and_deduplicate(
+                    [*pending.load(market.condition_id), *current_events]
+                )
+                item = stage_market(market, events, stage_roots[asset])
+                staged[asset].append(item)
+                staged_conditions.add(market.condition_id)
+                staged_free_bytes = shutil.disk_usage(shared).free
+                source_free_samples.append(staged_free_bytes)
+                if staged_free_bytes < MINIMUM_FREE_DISK_BYTES:
+                    raise ResourceLimitError(
+                        "staged canonical fragments exhausted disk safety margin"
+                    )
+                current.discard(market.condition_id)
+                pending.discard(market.condition_id)
+            else:
+                pending.append(market.condition_id, source_index, current_events)
+                pending_free_bytes = shutil.disk_usage(shared).free
+                source_free_samples.append(pending_free_bytes)
+                if pending_free_bytes < MINIMUM_FREE_DISK_BYTES:
+                    raise ResourceLimitError(
+                        "pending PMXT fragments exhausted disk safety margin"
+                    )
+                current.discard(market.condition_id)
+        if current.active_conditions():
+            raise SourceError("combined PMXT scan escaped the active market lifecycle")
+        if current.root.exists():
+            current.root.rmdir()
+
+        finalizable_conditions = {
+            market.condition_id
+            for market in combined_markets
+            if market.market_end_ns <= source_end_ns
+        }
+        if not finalizable_conditions.issubset(staged_conditions):
+            raise SourceError("causally complete PMXT markets were not finalized")
+
+        free_bytes, pending_bytes, staged_bytes = _verify_staged_disk_margin(
+            shared,
+            pending,
+            stage_roots,
+            completed_sources,
+            len(staged_conditions),
+            source_bytes,
+        )
+        minimum_free_bytes = min(minimum_free_bytes, free_bytes)
+        if source_free_samples:
+            minimum_free_bytes = min(minimum_free_bytes, *source_free_samples)
+        peak_pending_bytes = max(peak_pending_bytes, pending_bytes)
+        peak_staged_bytes = max(peak_staged_bytes, staged_bytes)
+        peak_active_conditions = max(peak_active_conditions, pending.active_conditions())
+        peak_rss_kib = max(peak_rss_kib, _peak_rss_kib())
+        print(
+            json.dumps(
+                {
+                    "storage_progress": {
+                        "active_conditions": pending.active_conditions(),
+                        "completed_markets": len(staged_conditions),
+                        "completed_sources": completed_sources,
+                        "disk_free_bytes": free_bytes,
+                        "pending_bytes": pending_bytes,
+                        "pmxt_scan_passes": scan_passes,
+                        "peak_rss_kib": peak_rss_kib,
+                        "source_elapsed_seconds": time.perf_counter() - source_began,
+                        "staged_bytes": staged_bytes,
+                    }
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+    if staged_conditions != set(market_by_condition):
+        raise SourceError("bounded PMXT lifecycle did not finalize every market")
+    if pending.active_conditions():
+        raise SourceError("bounded PMXT lifecycle retained completed market fragments")
+    gap_provenance = tuple(
+        Provenance(
+            source_id="pmxt_v2",
+            source_url=url,
+            retrieved_at_ns=time.time_ns(),
+            byte_length=0,
+            sha256=hashlib.sha256(canonical_json_bytes(evidence)).hexdigest(),
+            license_id="CC-BY-4.0",
+            source_precision="http_status",
+            transformations=("authoritative_http_404_absence",),
+        )
+        for url, evidence in sorted(source_gaps.items())
+    )
+    provenance = {
+        asset: (*tuple(provenance_lists[asset]), *gap_provenance) for asset in assets
+    }
+    metrics = {
+        "minimum_free_bytes": minimum_free_bytes,
+        "peak_active_conditions": peak_active_conditions,
+        "peak_pending_bytes": peak_pending_bytes,
+        "peak_current_bytes": peak_current_bytes,
+        "peak_rss_kib": peak_rss_kib,
+        "peak_staged_bytes": peak_staged_bytes,
+        "pmxt_scan_passes": scan_passes,
+        "source_objects": len(source_objects),
+    }
+    print(json.dumps({"storage_metrics": metrics}, sort_keys=True), flush=True)
+    return (
+        discoveries,
+        provenance,
+        {asset: tuple(staged[asset]) for asset in assets},
+        stage_roots,
+        source_bytes,
+        metrics,
+    )
+
+
 def run_partition(
     asset: Asset,
     day: date,
@@ -633,6 +1046,80 @@ def run_partition(
     return result
 
 
+def run_staged_partition(
+    asset: Asset,
+    day: date,
+    work_root: Path,
+    ledger_path: Path,
+    cutoff: datetime,
+    discovery: OfficialDiscovery,
+    staged_markets: tuple[StagedMarket, ...],
+    stage_root: Path,
+    shared_provenance: tuple[Provenance, ...],
+    shared_source_bytes: int = 0,
+    release_prefix: str = DATASET_RELEASE_PREFIX,
+    coverage_start_ns: int | None = None,
+) -> dict[str, Any]:
+    partition_id = f"{asset.value}/15m/{day.isoformat()}"
+    ledger = json.loads(ledger_path.read_bytes()) if ledger_path.exists() else {"partitions": {}}
+    if partition_id in ledger["partitions"]:
+        return cast(dict[str, Any], ledger["partitions"][partition_id])
+    began = time.perf_counter()
+    cpu_began = time.process_time()
+    work = work_root / f"{asset.value}-{day.isoformat()}"
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    release_cutoff = min(day_start + timedelta(days=1), cutoff)
+    if {item.condition_id for item in staged_markets} != {
+        market.condition_id for market in discovery.markets
+    }:
+        raise SourceError("staged partition inventory does not match official discovery")
+    inputs = PartitionInputs(
+        asset,
+        day.isoformat(),
+        discovery.markets,
+        provenance=(*discovery.provenance, *shared_provenance),
+        preexisting_exclusions=discovery.exclusions,
+        staged_markets=staged_markets,
+    )
+    pipeline_config = json.loads(Path("config/pipeline.json").read_bytes())
+    pipeline = Pipeline(
+        work / "output",
+        StateStore(work / "state"),
+        _tool_commit(),
+        PipelineLimits.from_config(pipeline_config),
+    )
+    built = pipeline.build(
+        inputs,
+        int(release_cutoff.timestamp()) * 1_000_000_000,
+        coverage_start_ns=coverage_start_ns,
+    )
+    release_tag = f"{release_prefix}-{release_bucket(day)}"
+    published = pipeline.publish(
+        built,
+        Publisher(GitHubReleaseBackend(REPOSITORY)),
+        release_tag,
+        (stage_root,),
+    )
+    result = {
+        "partition_id": partition_id,
+        "quality": built.tier.value,
+        "markets": len(discovery.markets),
+        "pmxt_events": sum(item.input_event_count for item in staged_markets),
+        "canonical_bytes": sum(path.stat().st_size for path in built.directory.iterdir()),
+        "manifest_sha256": built.manifest_digest,
+        "release_tag": release_tag,
+        "remote_assets": len(published),
+        "source_bytes": shared_source_bytes,
+        "wall_seconds": time.perf_counter() - began,
+        "cpu_seconds": time.process_time() - cpu_began,
+        "peak_rss_kib": _peak_rss_kib(),
+    }
+    ledger["partitions"][partition_id] = result
+    _atomic_json(ledger_path, ledger)
+    shutil.rmtree(work)
+    return result
+
+
 def run_day(
     day: date,
     work_root: Path,
@@ -645,7 +1132,7 @@ def run_day(
     expected_market_identities: dict[Asset, frozenset[tuple[str, frozenset[str]]]] | None = None,
     expected_source_identities: dict[str, tuple[int, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    spool, discoveries, provenance, source_bytes = prepare_shared_day(
+    discoveries, provenance, staged, stage_roots, source_bytes, _ = prepare_staged_day(
         day,
         work_root,
         coverage_start,
@@ -663,21 +1150,22 @@ def run_day(
     results = []
     for index, asset in enumerate(assets):
         results.append(
-            run_partition(
+            run_staged_partition(
                 asset,
                 day,
                 work_root,
                 ledger,
                 cutoff,
                 discoveries[asset],
-                spool,
+                staged[asset],
+                stage_roots[asset],
                 provenance[asset],
                 source_bytes if index == 0 else 0,
                 release_prefix,
                 coverage_start_ns,
             )
         )
-    shutil.rmtree(spool.parent)
+    shutil.rmtree(work_root / f"shared-{day.isoformat()}")
     return results
 
 

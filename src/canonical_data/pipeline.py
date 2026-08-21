@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
+
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.errors import MissingInitialSnapshotError, PipelineError, ResourceLimitError
 from canonical_data.manifest import build_manifest, verify_manifest
@@ -21,6 +23,7 @@ from canonical_data.models import (
     Market,
     Provenance,
     QualityTier,
+    Sample200ms,
     UnderlyingObservation,
 )
 from canonical_data.parquetio import (
@@ -60,6 +63,112 @@ class PartitionInputs:
     decoded_pmxt_events: tuple[BookEvent, ...] = ()
     event_spool_path: Path | None = None
     preexisting_exclusions: tuple[Exclusion, ...] = ()
+    staged_markets: tuple[StagedMarket, ...] = ()
+
+
+@dataclass(frozen=True)
+class StagedMarket:
+    condition_id: str
+    accepted_market: Market | None
+    tier: QualityTier | None
+    exclusion: Exclusion | None
+    event_path: Path | None
+    sample_path: Path | None
+    event_count: int
+    input_event_count: int
+    sample_count: int
+    sample_min_ns: int | None
+    sample_max_ns: int | None
+
+
+def transform_market(
+    market: Market, market_events: list[BookEvent]
+) -> tuple[Market | None, QualityTier | None, Exclusion | None, list[Sample200ms]]:
+    has_pmxt = bool(market_events)
+    gaps: list[tuple[int, int]] = []
+    try:
+        if has_pmxt:
+            states = BookReconstructor().reconstruct(market_events)
+            native_samples, gaps = resample_200ms(market, states)
+        else:
+            native_samples = []
+            gaps = [(market.market_start_ns, market.market_end_ns)]
+    except MissingInitialSnapshotError as reconstruction_error:
+        return (
+            None,
+            None,
+            Exclusion(
+                market.market_id,
+                ExclusionReason.NO_INITIAL_SNAPSHOT,
+                str(reconstruction_error),
+                {
+                    "condition_id": market.condition_id,
+                    "market_evidence_sha256": market.evidence_sha256,
+                },
+            ),
+            [],
+        )
+    except PipelineError as reconstruction_error:
+        return (
+            None,
+            None,
+            Exclusion(
+                market.market_id,
+                ExclusionReason.EVENT_CONFLICT,
+                f"invalid PMXT market evidence: {reconstruction_error}",
+                {
+                    "condition_id": market.condition_id,
+                    "market_evidence_sha256": market.evidence_sha256,
+                },
+            ),
+            [],
+        )
+    tier, exclusion = classify(market, has_pmxt, gaps)
+    if exclusion is not None:
+        return None, None, exclusion, []
+    accepted = Market(**{**market.__dict__, "quality_tier": tier})
+    return accepted, tier, None, native_samples
+
+
+def stage_market(
+    market: Market,
+    market_events: list[BookEvent],
+    directory: Path,
+) -> StagedMarket:
+    """Losslessly transform one causally complete market into compressed fragments."""
+    accepted, tier, exclusion, native_samples = transform_market(market, market_events)
+    if accepted is None:
+        return StagedMarket(
+            market.condition_id,
+            None,
+            None,
+            exclusion,
+            None,
+            None,
+            0,
+            len(market_events),
+            0,
+            None,
+            None,
+        )
+    directory.mkdir(parents=True, exist_ok=True)
+    event_path = directory / f"{market.condition_id}.events.parquet"
+    sample_path = directory / f"{market.condition_id}.samples.parquet"
+    write_table_atomic(event_path, EVENT_SCHEMA, [event_row(item) for item in market_events])
+    write_table_atomic(sample_path, SAMPLE_SCHEMA, [sample_row(item) for item in native_samples])
+    return StagedMarket(
+        market.condition_id,
+        accepted,
+        tier,
+        None,
+        event_path,
+        sample_path,
+        len(market_events),
+        len(market_events),
+        len(native_samples),
+        native_samples[0].grid_ts_ns if native_samples else None,
+        native_samples[-1].grid_ts_ns if native_samples else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -145,6 +254,7 @@ class Pipeline:
                 inputs.decoded_pmxt_events,
                 inputs.pmxt_rows,
                 inputs.event_spool_path,
+                inputs.staged_markets,
             )
         )
         if modes > 1:
@@ -160,58 +270,71 @@ class Pipeline:
         event_count = 0
         sample_count = 0
         spool = EventSpool(inputs.event_spool_path) if inputs.event_spool_path else None
-        if spool is not None:
+        staged = {item.condition_id: item for item in inputs.staged_markets}
+        if len(staged) != len(inputs.staged_markets):
+            raise PipelineError("staged market conditions must be unique")
+        streaming = spool is not None or bool(staged)
+        if streaming:
             event_writer = StreamingTableWriter(directory / "book-events.parquet", EVENT_SCHEMA)
             sample_writer = StreamingTableWriter(directory / "book-200ms.parquet", SAMPLE_SCHEMA)
         ordered_markets = sorted(inputs.markets, key=lambda item: item.condition_id)
         for market in ordered_markets:
             if market.asset is not inputs.asset:
                 raise PipelineError("market asset does not match partition")
+            if inputs.staged_markets:
+                item = staged.pop(market.condition_id, None)
+                if item is None:
+                    self._abort_spooled_build(spool, event_writer, sample_writer)
+                    raise PipelineError("staged market inventory is incomplete")
+                if item.exclusion is not None:
+                    exclusions.append(item.exclusion)
+                    continue
+                if (
+                    item.accepted_market is None
+                    or item.tier is None
+                    or item.event_path is None
+                    or item.sample_path is None
+                    or event_writer is None
+                    or sample_writer is None
+                ):
+                    self._abort_spooled_build(spool, event_writer, sample_writer)
+                    raise PipelineError("accepted staged market is incomplete")
+                accepted_markets.append(item.accepted_market)
+                partition_tiers.append(item.tier)
+                event_count += item.event_count
+                sample_count += item.sample_count
+                if event_count > self.limits.max_pmxt_rows:
+                    self._abort_spooled_build(spool, event_writer, sample_writer)
+                    raise ResourceLimitError("native events exceed partition cap")
+                if sample_count > self.limits.max_samples:
+                    self._abort_spooled_build(spool, event_writer, sample_writer)
+                    raise ResourceLimitError("derived samples exceed partition cap")
+                if item.sample_min_ns is not None:
+                    sample_min = (
+                        item.sample_min_ns
+                        if sample_min is None
+                        else min(sample_min, item.sample_min_ns)
+                    )
+                if item.sample_max_ns is not None:
+                    sample_max = (
+                        item.sample_max_ns
+                        if sample_max is None
+                        else max(sample_max, item.sample_max_ns)
+                    )
+                event_writer.append(pq.read_table(item.event_path).to_pylist())
+                sample_writer.append(pq.read_table(item.sample_path).to_pylist())
+                continue
             market_events = (
                 spool.load(market.condition_id)
                 if spool
                 else [event for event in pmxt_events if event.condition_id == market.condition_id]
             )
-            has_pmxt = bool(market_events)
-            states = []
-            gaps: list[tuple[int, int]] = []
-            try:
-                if has_pmxt:
-                    states = BookReconstructor().reconstruct(market_events)
-                    native_samples, gaps = resample_200ms(market, states)
-                else:
-                    native_samples, gaps = [], [(market.market_start_ns, market.market_end_ns)]
-            except MissingInitialSnapshotError as reconstruction_error:
-                exclusions.append(
-                    Exclusion(
-                        market.market_id,
-                        ExclusionReason.NO_INITIAL_SNAPSHOT,
-                        str(reconstruction_error),
-                        {
-                            "condition_id": market.condition_id,
-                            "market_evidence_sha256": market.evidence_sha256,
-                        },
-                    )
-                )
-                continue
-            except PipelineError as reconstruction_error:
-                exclusions.append(
-                    Exclusion(
-                        market.market_id,
-                        ExclusionReason.EVENT_CONFLICT,
-                        f"invalid PMXT market evidence: {reconstruction_error}",
-                        {
-                            "condition_id": market.condition_id,
-                            "market_evidence_sha256": market.evidence_sha256,
-                        },
-                    )
-                )
-                continue
-            tier, exclusion = classify(market, has_pmxt, gaps)
+            accepted, tier, exclusion, native_samples = transform_market(market, market_events)
             if exclusion is not None:
                 exclusions.append(exclusion)
                 continue
-            accepted_markets.append(Market(**{**market.__dict__, "quality_tier": tier}))
+            assert accepted is not None and tier is not None
+            accepted_markets.append(accepted)
             partition_tiers.append(tier)
             sample_count += len(native_samples)
             if sample_count > self.limits.max_samples:
@@ -246,7 +369,10 @@ class Pipeline:
         if any(not exclusion.evidence for exclusion in exclusions):
             self._abort_spooled_build(spool, event_writer, sample_writer)
             raise PipelineError("exclusion lacks bound evidence")
-        if spool is None:
+        if staged:
+            self._abort_spooled_build(spool, event_writer, sample_writer)
+            raise PipelineError("staged market inventory contains unexpected conditions")
+        if not streaming:
             counts = write_partition_tables(
                 directory, accepted_markets, events, samples, inputs.underlying, exclusions
             )
@@ -289,7 +415,8 @@ class Pipeline:
             for name, schema, rows in small:
                 write_table_atomic(directory / name, schema, rows)
                 counts[name] = len(rows)
-            spool.close()
+            if spool is not None:
+                spool.close()
         partition_bytes = sum(path.stat().st_size for path in directory.glob("*.parquet"))
         if partition_bytes > self.limits.max_partition_bytes:
             raise ResourceLimitError("transformed partition exceeds byte cap")
@@ -308,10 +435,10 @@ class Pipeline:
             "market_count": len(accepted_markets),
             "exclusion_count": len(exclusions),
             "sample_min_ts_ns": sample_min
-            if spool is not None
+            if streaming
             else min((item.grid_ts_ns for item in samples), default=None),
             "sample_max_ts_ns": sample_max
-            if spool is not None
+            if streaming
             else max((item.grid_ts_ns for item in samples), default=None),
         }
         _, digest = build_manifest(
@@ -400,6 +527,7 @@ class Pipeline:
             (len(inputs.markets), limits.max_markets, "markets"),
             (len(inputs.pmxt_rows), limits.max_pmxt_rows, "PMXT rows"),
             (len(inputs.decoded_pmxt_events), limits.max_pmxt_rows, "decoded PMXT events"),
+            (len(inputs.staged_markets), limits.max_markets, "staged markets"),
             (len(inputs.underlying), limits.max_underlying_rows, "underlying rows"),
         )
         for actual, maximum, name in checks:
