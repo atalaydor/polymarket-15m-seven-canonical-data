@@ -76,6 +76,21 @@
         "wall_seconds": 21600,
         "terminal": "GitHub six-hour job maximum"
       }
+    },
+    "measured_streaming_publication_split": {
+      "accessed_at": "2026-08-22",
+      "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/32356994563/job/96955444307",
+      "day": "2026-07-22",
+      "total_wall_seconds": 20066,
+      "source_acquisition_and_reconstruction_seconds": 19278,
+      "partition_build_and_publish_seconds": 559,
+      "final_remote_reconciliation_seconds": 229,
+      "source_objects": 25,
+      "source_bytes": 12557382976,
+      "peak_rss_kib": 5805896,
+      "peak_staged_bytes": 172725150,
+      "expensive_compute_fraction": 0.9607295923,
+      "conclusion": "release-group exclusion is required only for authenticated canonical mutation, not isolated computation"
     }
   },
   "derivation": {

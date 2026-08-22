@@ -9,6 +9,11 @@ UTC day -> official discovery for unfinished assets
         -> retain only compressed future-window and canonical-result fragments
         -> assemble, verify, publish, redownload, and delete each asset independently
         -> reconcile remote authority -> durable ledger checkpoint -> next day
+
+accelerated bounded assignment -> parallel isolated day compute (no release writer lock)
+                               -> authenticated transient partition bundle
+                               -> short release-group single-writer publish
+                               -> remote verification or authenticated no-op
 ```
 
 The planner never treats the repository ledger, Actions artifacts, or caches as canonical authority.
@@ -20,6 +25,10 @@ after any file or partition publication is restart-safe.
 Execution is sequential within each day, transient retries are bounded, source and transformed
 objects are capped, and each job has a six-hour limit. Temporary source bytes are deleted after the
 single combined scan; staged result fragments are deleted immediately after verified publication.
+The accelerated path preserves that per-job lifecycle while allowing different days to compute in
+parallel. Its only cross-job staging contains completed canonical partition bytes, is isolated by
+workflow run and day, and has one-day maximum retention. The release lock covers only remote
+mutation and verification; it does not cover source acquisition or reconstruction.
 
 PMXT filtering retains only exact official condition/token rows whose receive time is in the
 market's one-hour causal warm-up through its 15-minute end. A market intersects at most two hourly

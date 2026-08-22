@@ -1120,6 +1120,106 @@ def run_staged_partition(
     return result
 
 
+def compute_staged_partition(
+    asset: Asset,
+    day: date,
+    work_root: Path,
+    output_root: Path,
+    cutoff: datetime,
+    discovery: OfficialDiscovery,
+    staged_markets: tuple[StagedMarket, ...],
+    stage_root: Path,
+    shared_provenance: tuple[Provenance, ...],
+    coverage_start_ns: int,
+) -> dict[str, Any]:
+    """Build and verify one canonical partition without mutating remote authority."""
+    partition_id = f"{asset.value}/15m/{day.isoformat()}"
+    began = time.perf_counter()
+    cpu_began = time.process_time()
+    work = work_root / f"{asset.value}-{day.isoformat()}"
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    release_cutoff = min(day_start + timedelta(days=1), cutoff)
+    if {item.condition_id for item in staged_markets} != {
+        market.condition_id for market in discovery.markets
+    }:
+        raise SourceError("staged partition inventory does not match official discovery")
+    inputs = PartitionInputs(
+        asset,
+        day.isoformat(),
+        discovery.markets,
+        provenance=(*discovery.provenance, *shared_provenance),
+        preexisting_exclusions=discovery.exclusions,
+        staged_markets=staged_markets,
+    )
+    pipeline_config = json.loads(Path("config/pipeline.json").read_bytes())
+    pipeline = Pipeline(
+        output_root,
+        StateStore(work / "state"),
+        _tool_commit(),
+        PipelineLimits.from_config(pipeline_config),
+    )
+    built = pipeline.build(
+        inputs,
+        int(release_cutoff.timestamp()) * 1_000_000_000,
+        coverage_start_ns=coverage_start_ns,
+    )
+    result = {
+        "partition_id": partition_id,
+        "quality": built.tier.value,
+        "markets": len(discovery.markets),
+        "pmxt_events": sum(item.input_event_count for item in staged_markets),
+        "canonical_bytes": sum(path.stat().st_size for path in built.directory.iterdir()),
+        "manifest_sha256": built.manifest_digest,
+        "wall_seconds": time.perf_counter() - began,
+        "cpu_seconds": time.process_time() - cpu_began,
+        "peak_rss_kib": _peak_rss_kib(),
+    }
+    shutil.rmtree(work, ignore_errors=True)
+    shutil.rmtree(stage_root, ignore_errors=True)
+    return result
+
+
+def compute_day(
+    day: date,
+    work_root: Path,
+    output_root: Path,
+    coverage_start: datetime,
+    cutoff: datetime,
+    assets: tuple[Asset, ...],
+) -> list[dict[str, Any]]:
+    """Compute isolated canonical bytes while leaving publication to a short writer job."""
+    if output_root.exists() and any(output_root.iterdir()):
+        raise SourceError("compute output root is not empty")
+    output_root.mkdir(parents=True, exist_ok=True)
+    discoveries, provenance, staged, stage_roots, _, _ = prepare_staged_day(
+        day,
+        work_root,
+        coverage_start,
+        cutoff,
+        assets,
+    )
+    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    coverage_start_ns = int(max(day_start, coverage_start).timestamp()) * 1_000_000_000
+    results = []
+    for asset in assets:
+        results.append(
+            compute_staged_partition(
+                asset,
+                day,
+                work_root,
+                output_root,
+                cutoff,
+                discoveries[asset],
+                staged[asset],
+                stage_roots[asset],
+                provenance[asset],
+                coverage_start_ns,
+            )
+        )
+    shutil.rmtree(work_root / f"shared-{day.isoformat()}", ignore_errors=True)
+    return results
+
+
 def run_day(
     day: date,
     work_root: Path,
@@ -1182,6 +1282,7 @@ def main() -> None:
     parser.add_argument("--release-prefix", default=DATASET_RELEASE_PREFIX)
     parser.add_argument("--expected-market-identities", type=Path)
     parser.add_argument("--expected-source-identities", type=Path)
+    parser.add_argument("--compute-output-root", type=Path)
     args = parser.parse_args()
     assets = tuple(Asset(value) for value in args.assets.split(","))
     if not assets or len(set(assets)) != len(assets):
@@ -1211,18 +1312,36 @@ def main() -> None:
         }
     current = args.start
     while current <= args.end:
-        for result in run_day(
-            current,
-            args.work_root,
-            args.ledger,
-            args.coverage_start,
-            args.cutoff,
-            assets,
-            starts or None,
-            args.release_prefix,
-            expected_market_identities,
-            expected_source_identities,
-        ):
+        if args.compute_output_root is not None:
+            if (
+                args.start != args.end
+                or starts
+                or expected_market_identities
+                or expected_source_identities
+            ):
+                parser.error("compute-only execution requires one complete UTC day")
+            results = compute_day(
+                current,
+                args.work_root,
+                args.compute_output_root,
+                args.coverage_start,
+                args.cutoff,
+                assets,
+            )
+        else:
+            results = run_day(
+                current,
+                args.work_root,
+                args.ledger,
+                args.coverage_start,
+                args.cutoff,
+                assets,
+                starts or None,
+                args.release_prefix,
+                expected_market_identities,
+                expected_source_identities,
+            )
+        for result in results:
             print(json.dumps(result, sort_keys=True), flush=True)
         current += timedelta(days=1)
 

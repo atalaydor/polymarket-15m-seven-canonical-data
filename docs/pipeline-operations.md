@@ -1,7 +1,8 @@
 # Operations
 
-The workflow exposes only `canary` and `full-backfill` dispatch modes. Do not dispatch full backfill
-until the canary has committed `config/canary-receipt.json`; the planner also enforces this lock.
+The primary workflow exposes `canary` and `full-backfill` dispatch modes. Do not dispatch full
+backfill until the canary has committed `config/canary-receipt.json`; every production planner also
+enforces this lock.
 
 The adaptive canary first redownloads and authenticates the v4/v5/v6/v7 Tier A partitions for all seven assets, then
 requires current Gamma to match each accepted row's complete minimum semantic projection. Drift or
@@ -21,3 +22,17 @@ durable even if a later asset or checkpoint commit fails; the next run discovers
 does not repeat it. The child executor streams per-source lifecycle telemetry directly to the job
 log. `active_conditions`, `pending_bytes`, `staged_bytes`, and `disk_free_bytes` therefore expose
 progress before the six-hour boundary instead of being buffered until process exit.
+
+For a bounded set of explicitly assigned, remotely unfinished days, the accelerated batch workflow
+may run up to six isolated compute jobs concurrently. Compute has read-only repository authority and
+uses the same discovery, causal source lifecycle, reconstruction, classification, Parquet writer,
+manifest builder, and verification path as ordinary execution. It uploads the resulting partition
+directories plus a canonical receipt to an immutable v4 Actions artifact retained for at most one
+day. That artifact is transient staging, never dataset authority.
+
+Each staged day then enters the existing release-group concurrency queue. Only this short publish
+job has write authority. It authenticates the receipt, exact file set, byte lengths, SHA-256
+digests, internal manifest hashes, frozen partition identity, tool commit, and current remote
+inventory before using the content-addressed publisher. A partition that became durable while
+compute ran is an authenticated no-op; any divergence or out-of-plan identity fails closed. The
+artifact is deleted after successful durable verification and otherwise expires automatically.

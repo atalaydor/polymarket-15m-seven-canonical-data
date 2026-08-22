@@ -20,11 +20,12 @@ from unittest.mock import Mock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from helpers import START_S, market
+from helpers import START_S, market, pmxt_rows, provenance
 
 from canonical_data.acquire import AcquiredObject, BoundedAcquirer
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.errors import (
+    ConflictError,
     ResourceLimitError,
     SourceError,
     SourceIdentityError,
@@ -32,7 +33,10 @@ from canonical_data.errors import (
 )
 from canonical_data.inventory import SourceObject, pmxt_hourly_objects
 from canonical_data.models import Asset
+from canonical_data.pipeline import PartitionInputs, Pipeline, stage_market
+from canonical_data.pmxt import decode_rows
 from canonical_data.sources import OfficialDiscovery
+from canonical_data.state import StateStore
 from scripts.actions_backend import (
     CANARY_MAX_CANDIDATES,
     CANARY_MAX_CANDIDATES_TOTAL,
@@ -44,6 +48,8 @@ from scripts.actions_backend import (
     QualifiedCandidate,
     RemoteAsset,
     _adaptive_round_authorities,
+    _bundle_file_inventory,
+    _bundle_partition_directory,
     _candidate_starts,
     _control_plane_digest,
     _execute_canary_round,
@@ -53,8 +59,10 @@ from scripts.actions_backend import (
     _raise_child_failure,
     _request,
     _require_canary_receipt,
+    _require_complete_staged_coverage,
     _revalidate_prior_canary_evidence,
     _validate_receipt_coverage,
+    _validate_staged_partition,
     _verify_canary_dispositions,
     command_execute_day,
     day_plan,
@@ -73,6 +81,7 @@ from scripts.run_backfill import (
     _validate_expected_source_identity,
     _validate_pmxt_download,
     _verify_shared_disk_margin,
+    compute_staged_partition,
     run_day,
     run_staged_partition,
 )
@@ -205,6 +214,19 @@ class ActionsBackendTests(unittest.TestCase):
             recovery.index("git pull --ff-only origin main"),
             recovery.index("python -m pip install --disable-pip-version-check --no-cache-dir ."),
         )
+        accelerated = (
+            root / ".github/workflows/polymarket-15m-seven-accelerated-day.yml"
+        ).read_text()
+        batch = (
+            root / ".github/workflows/polymarket-15m-seven-accelerated-batch.yml"
+        ).read_text()
+        self.assertIn("python -m scripts.actions_backend compute-day", accelerated)
+        self.assertIn("python -m scripts.actions_backend publish-staged-day", accelerated)
+        self.assertIn("retention-days: 1", accelerated)
+        self.assertEqual(accelerated.count("concurrency:"), 1)
+        self.assertLess(accelerated.index("publish:"), accelerated.index("concurrency:"))
+        self.assertIn("max-parallel: 6", batch)
+        self.assertIn("validate-accelerated-matrix", batch)
         for module in ("scripts.actions_backend", "scripts.run_backfill"):
             completed = subprocess.run(
                 [sys.executable, "-m", module, "--help"],
@@ -248,6 +270,114 @@ class ActionsBackendTests(unittest.TestCase):
         ):
             command_execute_day("2026-04-05", "wrong-release")
         inventory.assert_not_called()
+
+    def test_staged_bundle_authentication_rejects_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            partition_id = "DOGE/15m/2026-04-13"
+            directory = _bundle_partition_directory(root, partition_id)
+            built = Pipeline(
+                root / "partitions",
+                StateStore(root / "state"),
+                "a" * 40,
+            ).build(
+                PartitionInputs(
+                    Asset.DOGE,
+                    "2026-04-13",
+                    (market(),),
+                    provenance=(provenance(),),
+                    decoded_pmxt_events=tuple(decode_rows(pmxt_rows(), "fixture")),
+                ),
+                market().market_end_ns,
+            )
+            self.assertEqual(directory, built.directory)
+            files = _bundle_file_inventory(directory, root)
+            self.assertEqual(
+                _validate_staged_partition(root, partition_id, "a" * 40, files),
+                directory,
+            )
+            (directory / "book-events.parquet").write_bytes(b"substituted")
+            with self.assertRaisesRegex(ConflictError, "receipt digest mismatch"):
+                _validate_staged_partition(root, partition_id, "a" * 40, files)
+
+    def test_staged_publication_requires_every_currently_unfinished_partition(self) -> None:
+        plan = {"BTC/15m/2026-04-13", "ETH/15m/2026-04-13"}
+        with self.assertRaisesRegex(ConflictError, "omits unfinished partitions"):
+            _require_complete_staged_coverage(
+                ["BTC/15m/2026-04-13"], plan, set()
+            )
+        _require_complete_staged_coverage(
+            ["BTC/15m/2026-04-13"], plan, {"ETH/15m/2026-04-13"}
+        )
+
+    def test_compute_only_partition_is_byte_equivalent_to_ordinary_staged_build(self) -> None:
+        selected = market()
+        day = datetime.fromtimestamp(START_S, UTC).date()
+        events = decode_rows(pmxt_rows(), "fixture")
+        cutoff = datetime.fromtimestamp(START_S + 900, UTC)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            compute_stage = root / "compute-stage"
+            ordinary_stage = root / "ordinary-stage"
+            computed_market = stage_market(selected, events, compute_stage)
+            ordinary_market = stage_market(selected, events, ordinary_stage)
+            discovery = OfficialDiscovery((selected,), (provenance("gamma"),))
+            with (
+                patch("scripts.run_backfill.shutil.rmtree"),
+                patch(
+                    "canonical_data.pipeline.Pipeline._available_memory_bytes",
+                    return_value=16_000_000_000,
+                ),
+            ):
+                computed = compute_staged_partition(
+                    Asset.DOGE,
+                    day,
+                    root / "compute-work",
+                    root / "compute-output",
+                    cutoff,
+                    discovery,
+                    (computed_market,),
+                    compute_stage,
+                    (provenance(),),
+                    START_S * 1_000_000_000,
+                )
+                with (
+                    patch("scripts.run_backfill.Pipeline.publish", return_value=[]),
+                    patch("scripts.run_backfill.GitHubReleaseBackend", return_value=Mock()),
+                ):
+                    ordinary = run_staged_partition(
+                        Asset.DOGE,
+                        day,
+                        root / "ordinary-work",
+                        root / "ledger.json",
+                        cutoff,
+                        discovery,
+                        (ordinary_market,),
+                        ordinary_stage,
+                        (provenance(),),
+                        coverage_start_ns=START_S * 1_000_000_000,
+                    )
+            self.assertEqual(computed["manifest_sha256"], ordinary["manifest_sha256"])
+            computed_directory = (
+                root
+                / "compute-output"
+                / "asset=DOGE"
+                / "timeframe=15m"
+                / f"date={day.isoformat()}"
+            )
+            ordinary_directory = (
+                root
+                / "ordinary-work"
+                / f"DOGE-{day.isoformat()}"
+                / "output"
+                / "asset=DOGE"
+                / "timeframe=15m"
+                / f"date={day.isoformat()}"
+            )
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in computed_directory.iterdir()},
+                {path.name: path.read_bytes() for path in ordinary_directory.iterdir()},
+            )
 
     def test_shared_spool_breaker_reports_exact_capacity_figures(self) -> None:
         spool = Mock()

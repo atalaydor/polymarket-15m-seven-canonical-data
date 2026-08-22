@@ -25,7 +25,7 @@ import pyarrow.parquet as pq
 
 from canonical_data.audit import canonical_json_bytes
 from canonical_data.discovery import GammaClient
-from canonical_data.errors import IdentityError, UnresolvedMarketError
+from canonical_data.errors import ConflictError, IdentityError, UnresolvedMarketError
 from canonical_data.httpclient import USER_AGENT
 from canonical_data.inventory import (
     PMXT_MISSING_OBJECT_URLS,
@@ -34,13 +34,16 @@ from canonical_data.inventory import (
     SourceObject,
     pmxt_hourly_objects,
 )
+from canonical_data.manifest import hash_file, verify_manifest
 from canonical_data.models import Asset, Market
 from canonical_data.planner import build_backfill_plan, release_bucket
 from canonical_data.quality import classify
+from canonical_data.release import GitHubReleaseBackend, Publisher
 from scripts.run_backfill import (
     DATASET_RELEASE_PREFIX,
     REPOSITORY,
     _fetch_gamma,
+    _tool_commit,
 )
 
 API = f"https://api.github.com/repos/{REPOSITORY}"
@@ -1051,6 +1054,42 @@ def command_plan() -> None:
     )
 
 
+def command_validate_accelerated_matrix() -> None:
+    authority = load_authority()
+    _require_canary_receipt(authority)
+    requested = json.loads(os.environ.get("REQUESTED_MATRIX", ""))
+    if not isinstance(requested, dict) or set(requested) != {"include"}:
+        raise RuntimeError("accelerated matrix must contain only include")
+    include = requested["include"]
+    if not isinstance(include, list) or not include or len(include) > 64:
+        raise RuntimeError("accelerated matrix must contain 1..64 bounded days")
+    inventory = remote_inventory()
+    anomalies = inventory_anomalies(inventory, authority)
+    if _fatal_inventory_anomalies(anomalies):
+        raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
+    unfinished_days = {
+        str(item["partition_id"]).split("/")[2] for item in unfinished_plan(inventory, authority)
+    }
+    validated = []
+    seen: set[str] = set()
+    for item in include:
+        if not isinstance(item, dict) or set(item) != {"day", "release_group"}:
+            raise RuntimeError("accelerated matrix row has the wrong shape")
+        day_text = str(item["day"])
+        release_group = str(item["release_group"])
+        if day_text in seen:
+            raise RuntimeError("accelerated matrix contains a duplicate day")
+        seen.add(day_text)
+        _validated_day_plan(authority, day_text, release_group)
+        if day_text in unfinished_days:
+            validated.append({"day": day_text, "release_group": release_group})
+    if not validated:
+        raise RuntimeError("accelerated matrix has no remotely unfinished days")
+    matrix = json.dumps({"include": validated}, separators=(",", ":"))
+    _write_output("matrix", matrix)
+    print(matrix)
+
+
 def command_checkpoint() -> None:
     if not os.environ.get("GITHUB_TOKEN"):
         raise RuntimeError("checkpoint requires authenticated GitHub remote authority")
@@ -1131,6 +1170,241 @@ def command_execute_day(day_text: str, expected_release_group: str | None = None
     for asset in assets:
         verify_remote_partition(f"{asset.value}/15m/{day_text}", refreshed)
     _atomic_json(LEDGER_PATH, reconcile_ledger(refreshed, authority))
+
+
+def _validated_day_plan(
+    authority: Authority, day_text: str, expected_release_group: str
+) -> list[dict[str, Any]]:
+    day = date.fromisoformat(day_text)
+    plan_for_day = [item for item in _full_plan(authority) if item["day"] == day.isoformat()]
+    if not plan_for_day:
+        raise RuntimeError("requested UTC day is outside the frozen plan")
+    release_groups = {str(item["release_group"]) for item in plan_for_day}
+    if release_groups != {expected_release_group}:
+        raise RuntimeError("requested recovery release group does not match the frozen plan")
+    return plan_for_day
+
+
+def _bundle_partition_directory(root: Path, partition_id: str) -> Path:
+    asset, timeframe, day_text = partition_id.split("/")
+    return root / "partitions" / f"asset={asset}" / f"timeframe={timeframe}" / f"date={day_text}"
+
+
+def _bundle_file_inventory(directory: Path, root: Path) -> list[dict[str, Any]]:
+    filenames = {path.name for path in directory.iterdir() if path.is_file()}
+    if filenames != EXPECTED_FILES:
+        raise ConflictError("staged partition has a noncanonical file inventory")
+    result = []
+    for path in sorted(directory.iterdir()):
+        byte_length, digest = hash_file(path)
+        result.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "byte_length": byte_length,
+                "sha256": digest,
+            }
+        )
+    return result
+
+
+def _validate_staged_partition(
+    root: Path,
+    partition_id: str,
+    expected_tool_commit: str,
+    expected_files: list[dict[str, Any]],
+) -> Path:
+    directory = _bundle_partition_directory(root, partition_id)
+    if not directory.is_dir():
+        raise ConflictError("staged partition directory is missing")
+    actual_files = _bundle_file_inventory(directory, root)
+    if actual_files != expected_files:
+        raise ConflictError("staged partition receipt digest mismatch")
+    manifest_digest = verify_manifest(directory)
+    manifest = json.loads((directory / "manifest.json").read_bytes())
+    asset, _, _ = partition_id.split("/")
+    manifest_files = manifest.get("files")
+    if not isinstance(manifest_files, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("path"), str)
+        for item in manifest_files
+    ):
+        raise ConflictError("staged partition manifest file inventory is malformed")
+    if (
+        {str(item["path"]) for item in manifest_files} != EXPECTED_FILES - {"manifest.json"}
+        or manifest.get("dataset_id") != "polymarket-15m-seven-v1"
+        or manifest.get("partition_id") != partition_id
+        or manifest.get("asset") != asset
+        or manifest.get("venue") != "polymarket"
+        or manifest.get("timeframe") != "15m"
+        or manifest.get("tool_commit") != expected_tool_commit
+        or manifest.get("quality_tier") not in {"TIER_A", "EXCLUDED"}
+        or manifest_digest
+        != next(item["sha256"] for item in actual_files if item["path"].endswith("manifest.json"))
+    ):
+        raise ConflictError("staged partition manifest authority mismatch")
+    return directory
+
+
+def _require_complete_staged_coverage(
+    partition_ids: list[str], plan_ids: set[str], complete: set[str]
+) -> None:
+    missing = sorted((plan_ids - complete) - set(partition_ids))
+    if missing:
+        raise ConflictError(f"staged receipt omits unfinished partitions: {missing}")
+
+
+def command_compute_day(
+    day_text: str, expected_release_group: str, bundle_root: Path
+) -> None:
+    authority = load_authority()
+    _require_canary_receipt(authority)
+    plan_for_day = _validated_day_plan(authority, day_text, expected_release_group)
+    inventory = remote_inventory()
+    anomalies = inventory_anomalies(inventory, authority)
+    if _fatal_inventory_anomalies(anomalies):
+        raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
+    complete = verified_partitions(inventory)
+    assets = tuple(
+        Asset(str(item["asset"])) for item in plan_for_day if item["partition_id"] not in complete
+    )
+    if bundle_root.exists() and any(bundle_root.iterdir()):
+        raise RuntimeError("staged bundle root is not empty")
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    if assets:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "scripts.run_backfill",
+                    "--work-root",
+                    str(root / "work"),
+                    "--ledger",
+                    str(root / "ledger.json"),
+                    "--start",
+                    day_text,
+                    "--end",
+                    day_text,
+                    "--coverage-start",
+                    authority.start.isoformat(),
+                    "--cutoff",
+                    authority.cutoff.isoformat(),
+                    "--assets",
+                    ",".join(asset.value for asset in assets),
+                    "--compute-output-root",
+                    str(bundle_root / "partitions"),
+                ],
+                text=True,
+                check=False,
+            )
+            _raise_child_failure(completed)
+    tool_commit = _tool_commit()
+    partitions = []
+    for asset in assets:
+        partition_id = f"{asset.value}/15m/{day_text}"
+        directory = _bundle_partition_directory(bundle_root, partition_id)
+        files = _bundle_file_inventory(directory, bundle_root)
+        _validate_staged_partition(bundle_root, partition_id, tool_commit, files)
+        partitions.append({"partition_id": partition_id, "files": files})
+    receipt = {
+        "schema_version": "1.0.0",
+        "dataset_id": "polymarket-15m-seven-v1",
+        "authority": "noncanonical immutable staged bytes pending authenticated publication",
+        "day": day_text,
+        "release_group": expected_release_group,
+        "tool_commit": tool_commit,
+        "partitions": partitions,
+    }
+    _atomic_json(bundle_root / "receipt.json", receipt)
+    print(
+        json.dumps(
+            {
+                "day": day_text,
+                "result": "STAGED" if partitions else "AUTHENTICATED_NO_OP",
+                "staged_partitions": len(partitions),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def command_publish_staged_day(
+    day_text: str, expected_release_group: str, bundle_root: Path
+) -> None:
+    authority = load_authority()
+    _require_canary_receipt(authority)
+    plan_for_day = _validated_day_plan(authority, day_text, expected_release_group)
+    plan_ids = {str(item["partition_id"]) for item in plan_for_day}
+    receipt_path = bundle_root / "receipt.json"
+    payload = receipt_path.read_bytes()
+    receipt = json.loads(payload)
+    if canonical_json_bytes(receipt) != payload:
+        raise ConflictError("staged receipt is not canonical JSON")
+    tool_commit = _tool_commit()
+    partitions_raw = receipt.get("partitions")
+    if not isinstance(partitions_raw, list) or any(
+        not isinstance(item, dict) or set(item) != {"partition_id", "files"}
+        for item in partitions_raw
+    ):
+        raise ConflictError("staged receipt partitions have the wrong shape")
+    partitions = cast(list[dict[str, Any]], partitions_raw)
+    partition_ids = [str(item.get("partition_id")) for item in partitions]
+    if (
+        receipt.get("schema_version") != "1.0.0"
+        or receipt.get("dataset_id") != "polymarket-15m-seven-v1"
+        or receipt.get("authority")
+        != "noncanonical immutable staged bytes pending authenticated publication"
+        or receipt.get("day") != day_text
+        or receipt.get("release_group") != expected_release_group
+        or receipt.get("tool_commit") != tool_commit
+        or len(partition_ids) != len(set(partition_ids))
+        or not set(partition_ids).issubset(plan_ids)
+    ):
+        raise ConflictError("staged receipt authority mismatch")
+    inventory = remote_inventory()
+    anomalies = inventory_anomalies(inventory, authority)
+    if _fatal_inventory_anomalies(anomalies):
+        raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
+    complete = verified_partitions(inventory)
+    _require_complete_staged_coverage(partition_ids, plan_ids, complete)
+    directories = {
+        partition_id: _validate_staged_partition(
+            bundle_root,
+            partition_id,
+            tool_commit,
+            cast(list[dict[str, Any]], item.get("files")),
+        )
+        for partition_id, item in zip(partition_ids, partitions, strict=True)
+    }
+    publisher = Publisher(GitHubReleaseBackend(REPOSITORY))
+    published = []
+    for partition_id in partition_ids:
+        if partition_id in complete:
+            continue
+        publisher.publish_partition(
+            expected_release_group,
+            partition_id,
+            directories[partition_id],
+        )
+        published.append(partition_id)
+    refreshed = remote_inventory()
+    refreshed_anomalies = inventory_anomalies(refreshed, authority)
+    if _fatal_inventory_anomalies(refreshed_anomalies):
+        raise RuntimeError(
+            f"remote inventory fails closed: {json.dumps(refreshed_anomalies)}"
+        )
+    for partition_id in partition_ids:
+        verify_remote_partition(partition_id, refreshed)
+    print(
+        json.dumps(
+            {
+                "day": day_text,
+                "published_partitions": len(published),
+                "authenticated_no_op_partitions": len(partition_ids) - len(published),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _candidate_starts(authority: Authority) -> list[int]:
@@ -1720,9 +1994,18 @@ def main() -> None:
     commands.add_parser("canary")
     commands.add_parser("reconcile")
     commands.add_parser("checkpoint")
+    commands.add_parser("validate-accelerated-matrix")
     day = commands.add_parser("execute-day")
     day.add_argument("--day", required=True)
     day.add_argument("--expected-release-group")
+    compute = commands.add_parser("compute-day")
+    compute.add_argument("--day", required=True)
+    compute.add_argument("--expected-release-group", required=True)
+    compute.add_argument("--bundle-root", type=Path, required=True)
+    publish = commands.add_parser("publish-staged-day")
+    publish.add_argument("--day", required=True)
+    publish.add_argument("--expected-release-group", required=True)
+    publish.add_argument("--bundle-root", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "plan":
         command_plan()
@@ -1734,6 +2017,12 @@ def main() -> None:
         print(json.dumps(reconcile_ledger(remote_inventory(), authority), sort_keys=True))
     elif args.command == "checkpoint":
         command_checkpoint()
+    elif args.command == "validate-accelerated-matrix":
+        command_validate_accelerated_matrix()
+    elif args.command == "compute-day":
+        command_compute_day(args.day, args.expected_release_group, args.bundle_root)
+    elif args.command == "publish-staged-day":
+        command_publish_staged_day(args.day, args.expected_release_group, args.bundle_root)
     else:
         command_execute_day(args.day, args.expected_release_group)
 
