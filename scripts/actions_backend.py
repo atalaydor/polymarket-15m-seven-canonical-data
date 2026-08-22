@@ -1067,9 +1067,7 @@ def command_validate_accelerated_matrix() -> None:
     anomalies = inventory_anomalies(inventory, authority)
     if _fatal_inventory_anomalies(anomalies):
         raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
-    unfinished_days = {
-        str(item["partition_id"]).split("/")[2] for item in unfinished_plan(inventory, authority)
-    }
+    unfinished_by_day = _assets_by_day(unfinished_plan(inventory, authority))
     validated = []
     seen: set[str] = set()
     for item in include:
@@ -1081,8 +1079,15 @@ def command_validate_accelerated_matrix() -> None:
             raise RuntimeError("accelerated matrix contains a duplicate day")
         seen.add(day_text)
         _validated_day_plan(authority, day_text, release_group)
-        if day_text in unfinished_days:
-            validated.append({"day": day_text, "release_group": release_group})
+        assets = unfinished_by_day.get(day_text, [])
+        if assets:
+            validated.append(
+                {
+                    "day": day_text,
+                    "release_group": release_group,
+                    "assets": ",".join(assets),
+                }
+            )
     if not validated:
         raise RuntimeError("accelerated matrix has no remotely unfinished days")
     matrix = json.dumps({"include": validated}, separators=(",", ":"))
@@ -1185,6 +1190,28 @@ def _validated_day_plan(
     return plan_for_day
 
 
+def _assets_by_day(plan: list[dict[str, Any]]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for item in plan:
+        result.setdefault(str(item["day"]), []).append(str(item["asset"]))
+    return result
+
+
+def _validated_compute_assets(
+    plan_for_day: list[dict[str, Any]], expected_assets_text: str
+) -> tuple[Asset, ...]:
+    if not expected_assets_text:
+        raise RuntimeError("staged compute asset assignment is empty or duplicated")
+    requested_assets = expected_assets_text.split(",")
+    if len(requested_assets) != len(set(requested_assets)):
+        raise RuntimeError("staged compute asset assignment is empty or duplicated")
+    assets = tuple(Asset(value) for value in requested_assets)
+    planned_assets = {Asset(str(item["asset"])) for item in plan_for_day}
+    if not set(assets).issubset(planned_assets):
+        raise RuntimeError("staged compute asset assignment is outside the frozen day plan")
+    return assets
+
+
 def _bundle_partition_directory(root: Path, partition_id: str) -> Path:
     asset, timeframe, day_text = partition_id.split("/")
     return root / "partitions" / f"asset={asset}" / f"timeframe={timeframe}" / f"date={day_text}"
@@ -1253,19 +1280,15 @@ def _require_complete_staged_coverage(
 
 
 def command_compute_day(
-    day_text: str, expected_release_group: str, bundle_root: Path
+    day_text: str,
+    expected_release_group: str,
+    expected_assets_text: str,
+    bundle_root: Path,
 ) -> None:
     authority = load_authority()
     _require_canary_receipt(authority)
     plan_for_day = _validated_day_plan(authority, day_text, expected_release_group)
-    inventory = remote_inventory()
-    anomalies = inventory_anomalies(inventory, authority)
-    if _fatal_inventory_anomalies(anomalies):
-        raise RuntimeError(f"remote inventory fails closed: {json.dumps(anomalies)}")
-    complete = verified_partitions(inventory)
-    assets = tuple(
-        Asset(str(item["asset"])) for item in plan_for_day if item["partition_id"] not in complete
-    )
+    assets = _validated_compute_assets(plan_for_day, expected_assets_text)
     if bundle_root.exists() and any(bundle_root.iterdir()):
         raise RuntimeError("staged bundle root is not empty")
     bundle_root.mkdir(parents=True, exist_ok=True)
@@ -2001,6 +2024,7 @@ def main() -> None:
     compute = commands.add_parser("compute-day")
     compute.add_argument("--day", required=True)
     compute.add_argument("--expected-release-group", required=True)
+    compute.add_argument("--expected-assets", required=True)
     compute.add_argument("--bundle-root", type=Path, required=True)
     publish = commands.add_parser("publish-staged-day")
     publish.add_argument("--day", required=True)
@@ -2020,7 +2044,12 @@ def main() -> None:
     elif args.command == "validate-accelerated-matrix":
         command_validate_accelerated_matrix()
     elif args.command == "compute-day":
-        command_compute_day(args.day, args.expected_release_group, args.bundle_root)
+        command_compute_day(
+            args.day,
+            args.expected_release_group,
+            args.expected_assets,
+            args.bundle_root,
+        )
     elif args.command == "publish-staged-day":
         command_publish_staged_day(args.day, args.expected_release_group, args.bundle_root)
     else:

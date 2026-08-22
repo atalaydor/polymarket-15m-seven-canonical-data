@@ -3,20 +3,13 @@ name: Polymarket 15m x 7 isolated compute and serialized publish
 on:
   workflow_call:
     inputs:
+      assets:
+        required: true
+        type: string
       day:
         required: true
         type: string
       release_group:
-        required: true
-        type: string
-  workflow_dispatch:
-    inputs:
-      day:
-        description: One remotely unfinished UTC day
-        required: true
-        type: string
-      release_group:
-        description: Frozen release group owning that UTC day
         required: true
         type: string
 
@@ -35,13 +28,14 @@ jobs:
       - run: python -m pip install --disable-pip-version-check --no-cache-dir .
       - name: Compute isolated authenticated canonical bytes
         env:
+          ASSETS: ${{ inputs.assets }}
           DAY: ${{ inputs.day }}
-          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_GROUP: ${{ inputs.release_group }}
         run: >-
           python -m scripts.actions_backend compute-day
           --day "$DAY"
           --expected-release-group "$RELEASE_GROUP"
+          --expected-assets "$ASSETS"
           --bundle-root "$RUNNER_TEMP/staged-bundle"
       - id: upload
         name: Store immutable noncanonical staging bundle

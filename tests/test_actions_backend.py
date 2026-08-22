@@ -48,6 +48,7 @@ from scripts.actions_backend import (
     QualifiedCandidate,
     RemoteAsset,
     _adaptive_round_authorities,
+    _assets_by_day,
     _bundle_file_inventory,
     _bundle_partition_directory,
     _candidate_starts,
@@ -63,6 +64,7 @@ from scripts.actions_backend import (
     _revalidate_prior_canary_evidence,
     _validate_receipt_coverage,
     _validate_staged_partition,
+    _validated_compute_assets,
     _verify_canary_dispositions,
     command_execute_day,
     day_plan,
@@ -221,12 +223,15 @@ class ActionsBackendTests(unittest.TestCase):
             root / ".github/workflows/polymarket-15m-seven-accelerated-batch.yml"
         ).read_text()
         self.assertIn("python -m scripts.actions_backend compute-day", accelerated)
+        self.assertIn('--expected-assets "$ASSETS"', accelerated)
+        self.assertNotIn("workflow_dispatch:", accelerated)
         self.assertIn("python -m scripts.actions_backend publish-staged-day", accelerated)
         self.assertIn("retention-days: 1", accelerated)
         self.assertEqual(accelerated.count("concurrency:"), 1)
         self.assertLess(accelerated.index("publish:"), accelerated.index("concurrency:"))
         self.assertIn("max-parallel: 6", batch)
         self.assertIn("validate-accelerated-matrix", batch)
+        self.assertIn("contents: write", batch)
         for module in ("scripts.actions_backend", "scripts.run_backfill"):
             completed = subprocess.run(
                 [sys.executable, "-m", module, "--help"],
@@ -309,6 +314,21 @@ class ActionsBackendTests(unittest.TestCase):
         _require_complete_staged_coverage(
             ["BTC/15m/2026-04-13"], plan, {"ETH/15m/2026-04-13"}
         )
+
+    def test_accelerated_assignment_is_exact_bounded_and_fail_closed(self) -> None:
+        plan = [
+            {"day": "2026-04-13", "asset": "BTC"},
+            {"day": "2026-04-13", "asset": "ETH"},
+        ]
+        self.assertEqual(_assets_by_day(plan), {"2026-04-13": ["BTC", "ETH"]})
+        self.assertEqual(
+            _validated_compute_assets(plan, "BTC,ETH"), (Asset.BTC, Asset.ETH)
+        )
+        for assignment in ("", "BTC,BTC", "BTC,SOL"):
+            with self.subTest(assignment=assignment), self.assertRaises(
+                (RuntimeError, ValueError)
+            ):
+                _validated_compute_assets(plan, assignment)
 
     def test_compute_only_partition_is_byte_equivalent_to_ordinary_staged_build(self) -> None:
         selected = market()

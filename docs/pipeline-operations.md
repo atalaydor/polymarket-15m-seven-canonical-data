@@ -23,9 +23,11 @@ does not repeat it. The child executor streams per-source lifecycle telemetry di
 log. `active_conditions`, `pending_bytes`, `staged_bytes`, and `disk_free_bytes` therefore expose
 progress before the six-hour boundary instead of being buffered until process exit.
 
-For a bounded set of explicitly assigned, remotely unfinished days, the accelerated batch workflow
-may run up to six isolated compute jobs concurrently. Compute has read-only repository authority and
-uses the same discovery, causal source lifecycle, reconstruction, classification, Parquet writer,
+For a bounded set of explicitly assigned, remotely unfinished days, one write-capable control-plane
+job reads draft Release authority and emits the exact unfinished asset assignment. It performs no
+mutation. The accelerated batch may then run up to six isolated, read-only compute jobs concurrently;
+they cannot enumerate draft Releases and receive only that authenticated assignment. Compute uses
+the same discovery, causal source lifecycle, reconstruction, classification, Parquet writer,
 manifest builder, and verification path as ordinary execution. It uploads the resulting partition
 directories plus a canonical receipt to an immutable v4 Actions artifact retained for at most one
 day. That artifact is transient staging, never dataset authority.

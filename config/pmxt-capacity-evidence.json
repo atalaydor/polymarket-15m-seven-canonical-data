@@ -91,6 +91,15 @@
       "peak_staged_bytes": 172725150,
       "expensive_compute_fraction": 0.9607295923,
       "conclusion": "release-group exclusion is required only for authenticated canonical mutation, not isolated computation"
+    },
+    "draft_authority_permission_probe": {
+      "accessed_at": "2026-08-22",
+      "url": "https://github.com/atalaydor/polymarket-15m-seven-canonical-data/actions/runs/32566042168",
+      "requested_day": "2026-04-30",
+      "remotely_durable_partitions": 7,
+      "compute_token_permission": "contents: read",
+      "observed_result": "draft Release assets were not visible and source computation began",
+      "disposition": "canceled before staging or publication; authority enumeration moved to the nonmutating write-capable batch planner"
     }
   },
   "derivation": {

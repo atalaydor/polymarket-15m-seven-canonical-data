@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
     outputs:
       matrix: ${{ steps.validate.outputs.matrix }}
     steps:
@@ -37,5 +37,6 @@ jobs:
       matrix: ${{ fromJSON(needs.validate-plan.outputs.matrix) }}
     uses: ./.github/workflows/polymarket-15m-seven-accelerated-day.yml
     with:
+      assets: ${{ matrix.assets }}
       day: ${{ matrix.day }}
       release_group: ${{ matrix.release_group }}
